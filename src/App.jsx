@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
+import localforage from "localforage";
 
 const ACCESS_TOKEN_STORAGE_KEY = "banana.accessToken";
 const ACCESS_EXPIRES_STORAGE_KEY = "banana.accessExpiresAt";
@@ -7,6 +8,11 @@ const SELECTED_MODEL_STORAGE_KEY = "banana.selectedModelId";
 const SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
 const SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
 const SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.selectedLayoutColumns";
+const SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.selectedImageSize";
+const PROMPT_STORAGE_KEY = "banana.prompt";
+const LAST_GENERATION_DB_NAME = "banana.studio";
+const LAST_GENERATION_STORE_NAME = "app";
+const LAST_GENERATION_RECORD_KEY = "lastGenerationResult";
 const MAX_REFERENCE_IMAGES = 12;
 const MAX_LAYOUT_TRACKS = 8;
 const PROMPT_TEXTAREA_MIN_ROWS = 2;
@@ -28,9 +34,36 @@ const ASPECT_RATIO_OPTIONS = [
   { value: "21:9", label: "超宽 21:9" },
 ];
 const SUPPORTED_ASPECT_RATIO_VALUES = new Set(ASPECT_RATIO_OPTIONS.map((option) => option.value));
+const IMAGE_SIZE_OPTIONS = [
+  { value: "1K", label: "1K" },
+  { value: "2K", label: "2K" },
+  { value: "4K", label: "4K" },
+];
+const SUPPORTED_IMAGE_SIZE_VALUES = new Set(IMAGE_SIZE_OPTIONS.map((option) => option.value));
+const MIN_PREVIEW_SCALE = 1;
+const MAX_PREVIEW_SCALE = 6;
+const generationResultStorage = localforage.createInstance({
+  name: LAST_GENERATION_DB_NAME,
+  storeName: LAST_GENERATION_STORE_NAME,
+});
 
 function normalizeAspectRatioValue(value) {
   return SUPPORTED_ASPECT_RATIO_VALUES.has(value) ? value : "1:1";
+}
+
+function normalizeImageSizeValue(value) {
+  return SUPPORTED_IMAGE_SIZE_VALUES.has(value) ? value : "1K";
+}
+
+function clampPreviewScale(value) {
+  return Math.min(Math.max(value, MIN_PREVIEW_SCALE), MAX_PREVIEW_SCALE);
+}
+
+function getPointerDistance(firstPointer, secondPointer) {
+  return Math.hypot(
+    secondPointer.x - firstPointer.x,
+    secondPointer.y - firstPointer.y,
+  );
 }
 
 function getModelAspectRatioOptions(model) {
@@ -41,6 +74,16 @@ function getModelAspectRatioOptions(model) {
   );
 
   return ASPECT_RATIO_OPTIONS.filter((option) => allowedValues.has(option.value));
+}
+
+function getModelImageSizeOptions(model) {
+  const allowedValues = new Set(
+    Array.isArray(model?.supportedImageSizes) && model.supportedImageSizes.length > 0
+      ? model.supportedImageSizes
+      : ["1K"],
+  );
+
+  return IMAGE_SIZE_OPTIONS.filter((option) => allowedValues.has(option.value));
 }
 
 function clampLayoutTrack(value) {
@@ -399,6 +442,19 @@ async function requestGeneration(accessToken, payload) {
   return parseJsonResponse(response);
 }
 
+async function requestEnhancement(accessToken, payload) {
+  const response = await fetch("/api/enhance", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  return parseJsonResponse(response);
+}
+
 function ReferenceCard({ image, index, onRemove, isDragging = false }) {
   return (
     <article className={`reference-card${isDragging ? " is-dragging" : ""}`}>
@@ -432,6 +488,63 @@ function ReferenceCard({ image, index, onRemove, isDragging = false }) {
   );
 }
 
+function getNextImageSize(currentSize, supportedSizes) {
+  const availableSizes = IMAGE_SIZE_OPTIONS
+    .map((option) => option.value)
+    .filter((value) => supportedSizes.includes(value));
+  const currentIndex = availableSizes.indexOf(currentSize);
+
+  if (currentIndex === -1) {
+    return availableSizes[0] || "";
+  }
+
+  return availableSizes[currentIndex + 1] || "";
+}
+
+function buildPersistedGenerationResultRecord(generationResult) {
+  if (!generationResult?.imageBase64 || !generationResult?.mimeType) {
+    return null;
+  }
+
+  const {
+    previewUrl: _previewUrl,
+    ...persistedRecord
+  } = generationResult;
+
+  return {
+    ...persistedRecord,
+    persistedAt: new Date().toISOString(),
+  };
+}
+
+function restorePersistedGenerationResultRecord(record) {
+  if (!record?.imageBase64 || !record?.mimeType) {
+    return null;
+  }
+
+  return {
+    ...record,
+    previewUrl: `data:${record.mimeType};base64,${record.imageBase64}`,
+    downloadName: record.downloadName || buildDownloadName(),
+  };
+}
+
+async function readPersistedGenerationResult() {
+  const persistedRecord = await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY);
+  return restorePersistedGenerationResultRecord(persistedRecord);
+}
+
+async function writePersistedGenerationResult(generationResult) {
+  const persistedRecord = buildPersistedGenerationResultRecord(generationResult);
+
+  if (persistedRecord) {
+    await generationResultStorage.setItem(LAST_GENERATION_RECORD_KEY, persistedRecord);
+    return;
+  }
+
+  await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
+}
+
 function App() {
   const [password, setPassword] = useState(() => readSearchParam("pw"));
   const [accessToken, setAccessToken] = useState(() =>
@@ -456,19 +569,70 @@ function App() {
   const [layoutColumns, setLayoutColumns] = useState(() =>
     clampLayoutTrack(readLocalValue(SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) || 1),
   );
-  const [prompt, setPrompt] = useState("");
+  const [selectedImageSize, setSelectedImageSize] = useState(() =>
+    normalizeImageSizeValue(readLocalValue(SELECTED_IMAGE_SIZE_STORAGE_KEY) || "1K"),
+  );
+  const [prompt, setPrompt] = useState(() => readLocalValue(PROMPT_STORAGE_KEY));
   const [referenceImages, setReferenceImages] = useState([]);
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
   const [studioError, setStudioError] = useState("");
   const [studioPending, setStudioPending] = useState(false);
+  const [enhancePending, setEnhancePending] = useState(false);
   const [generationResult, setGenerationResult] = useState(null);
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+  const [imagePreviewDragging, setImagePreviewDragging] = useState(false);
+  const [imagePreviewViewportSize, setImagePreviewViewportSize] = useState({
+    width: 0,
+    height: 0,
+  });
+  const [imagePreviewNaturalSize, setImagePreviewNaturalSize] = useState({
+    width: 0,
+    height: 0,
+  });
+  const [imagePreviewTransform, setImagePreviewTransform] = useState({
+    scale: MIN_PREVIEW_SCALE,
+    x: 0,
+    y: 0,
+  });
   const [uploadDragActive, setUploadDragActive] = useState(false);
   const [referenceDragActive, setReferenceDragActive] = useState(false);
+  const [promptMode, setPromptMode] = useState("simple");
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const referenceGridRef = useRef(null);
+  const imagePreviewViewportRef = useRef(null);
+  const imagePreviewPointersRef = useRef(new Map());
+  const imagePreviewPanRef = useRef(null);
+  const imagePreviewPinchRef = useRef(null);
+  const hasRestoredGenerationResultRef = useRef(false);
   const hasLayoutValues = Boolean(selectedAspectRatio && layoutRows > 0 && layoutColumns > 0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreLastGenerationResult() {
+      try {
+        const persistedResult = await readPersistedGenerationResult();
+
+        if (cancelled || !persistedResult) {
+          return;
+        }
+
+        setGenerationResult(persistedResult);
+      } catch (error) {
+        console.warn("Restore persisted generation result failed:", error);
+      } finally {
+        hasRestoredGenerationResultRef.current = true;
+      }
+    }
+
+    void restoreLastGenerationResult();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!accessToken) {
@@ -561,6 +725,63 @@ function App() {
     return getModelAspectRatioOptions(selectedModel);
   }, [selectedModel]);
 
+  const availableImageSizeOptions = useMemo(() => {
+    return getModelImageSizeOptions(selectedModel);
+  }, [selectedModel]);
+
+  const generationResultModel = useMemo(() => {
+    if (!generationResult?.bananaModelId) {
+      return null;
+    }
+
+    return models.find((item) => item.id === generationResult.bananaModelId) || null;
+  }, [generationResult?.bananaModelId, models]);
+
+  const enhancementTargetImageSize = useMemo(() => {
+    if (!generationResult) {
+      return "";
+    }
+
+    const supportedSizes = generationResultModel?.supportedImageSizes || ["1K"];
+    return getNextImageSize(
+      normalizeImageSizeValue(generationResult.imageSize || "1K"),
+      supportedSizes,
+    );
+  }, [generationResult, generationResultModel]);
+
+  const canEnhanceGeneration = Boolean(
+    generationResult &&
+      generationResultModel?.supportsImageSizeParam &&
+      enhancementTargetImageSize,
+  );
+
+  const imagePreviewBaseStyle = useMemo(() => {
+    const { width: naturalWidth, height: naturalHeight } = imagePreviewNaturalSize;
+    const { width: viewportWidth, height: viewportHeight } = imagePreviewViewportSize;
+
+    if (!naturalWidth || !naturalHeight || !viewportWidth || !viewportHeight) {
+      return null;
+    }
+
+    const devicePixelRatio =
+      typeof window !== "undefined" && Number.isFinite(window.devicePixelRatio)
+        ? window.devicePixelRatio
+        : 1;
+    const stageWidth = Math.max(viewportWidth - 48, 0);
+    const stageHeight = Math.max(viewportHeight - 176, 0);
+    const containScale = Math.min(
+      stageWidth / naturalWidth,
+      stageHeight / naturalHeight,
+      1 / Math.max(devicePixelRatio, 1),
+    );
+    const safeScale = Number.isFinite(containScale) && containScale > 0 ? containScale : 1;
+
+    return {
+      width: `${naturalWidth * safeScale}px`,
+      height: `${naturalHeight * safeScale}px`,
+    };
+  }, [imagePreviewNaturalSize, imagePreviewViewportSize]);
+
   useEffect(() => {
     writeLocalValue(SELECTED_MODEL_STORAGE_KEY, selectedModelId);
   }, [selectedModelId]);
@@ -591,6 +812,27 @@ function App() {
   }, [layoutColumns]);
 
   useEffect(() => {
+    if (!SUPPORTED_IMAGE_SIZE_VALUES.has(selectedImageSize)) {
+      setSelectedImageSize("1K");
+      return;
+    }
+
+    writeLocalValue(SELECTED_IMAGE_SIZE_STORAGE_KEY, selectedImageSize);
+  }, [selectedImageSize]);
+
+  useEffect(() => {
+    if (availableImageSizeOptions.some((option) => option.value === selectedImageSize)) {
+      return;
+    }
+
+    setSelectedImageSize(availableImageSizeOptions[0]?.value || "1K");
+  }, [availableImageSizeOptions, selectedImageSize]);
+
+  useEffect(() => {
+    writeLocalValue(PROMPT_STORAGE_KEY, prompt);
+  }, [prompt]);
+
+  useEffect(() => {
     if (!hasLayoutValues) {
       return;
     }
@@ -603,8 +845,134 @@ function App() {
   }, [hasLayoutValues, layoutColumns, layoutRows, selectedAspectRatio]);
 
   useEffect(() => {
-    resizePromptTextarea(promptTextareaRef.current);
-  }, [prompt]);
+    const textarea = promptTextareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    if (promptMode === "focus") {
+      textarea.style.height = "100%";
+      textarea.style.overflowY = "auto";
+      return;
+    }
+
+    resizePromptTextarea(textarea);
+  }, [prompt, promptMode]);
+
+  useEffect(() => {
+    if (promptMode !== "focus") {
+      return;
+    }
+
+    const textarea = promptTextareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+  }, [promptMode]);
+
+  useEffect(() => {
+    if (!imagePreviewOpen || typeof window === "undefined" || typeof document === "undefined") {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    setImagePreviewViewportSize({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        setImagePreviewOpen(false);
+        return;
+      }
+
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        setImagePreviewTransform((currentValue) => ({
+          ...currentValue,
+          scale: clampPreviewScale(currentValue.scale + 0.4),
+        }));
+        return;
+      }
+
+      if (event.key === "-") {
+        event.preventDefault();
+        setImagePreviewTransform((currentValue) => {
+          const nextScale = clampPreviewScale(currentValue.scale - 0.4);
+          return {
+            scale: nextScale,
+            x: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.x,
+            y: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.y,
+          };
+        });
+        return;
+      }
+
+      if (event.key === "0") {
+        event.preventDefault();
+        setImagePreviewTransform({
+          scale: MIN_PREVIEW_SCALE,
+          x: 0,
+          y: 0,
+        });
+      }
+    }
+
+    function handleResize() {
+      setImagePreviewViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [imagePreviewOpen]);
+
+  useEffect(() => {
+    if (!hasRestoredGenerationResultRef.current) {
+      return;
+    }
+
+    void writePersistedGenerationResult(generationResult).catch((error) => {
+      console.warn("Persist generation result failed:", error);
+    });
+  }, [generationResult]);
+
+  useEffect(() => {
+    if (!imagePreviewOpen) {
+      return;
+    }
+
+    setImagePreviewTransform({
+      scale: MIN_PREVIEW_SCALE,
+      x: 0,
+      y: 0,
+    });
+    setImagePreviewNaturalSize({
+      width: 0,
+      height: 0,
+    });
+    setImagePreviewDragging(false);
+    imagePreviewPointersRef.current.clear();
+    imagePreviewPanRef.current = null;
+    imagePreviewPinchRef.current = null;
+  }, [imagePreviewOpen, generationResult?.previewUrl]);
 
   async function handleVerifySubmit(event) {
     event.preventDefault();
@@ -789,6 +1157,12 @@ function App() {
     setStudioError("");
   }
 
+  function togglePromptMode() {
+    setPromptMode((currentValue) =>
+      currentValue === "focus" ? "simple" : "focus",
+    );
+  }
+
   async function handleGenerate(event) {
     event.preventDefault();
 
@@ -811,6 +1185,7 @@ function App() {
         prompt,
         imageOptions: {
           aspectRatio: selectedAspectRatio,
+          imageSize: selectedImageSize,
           layoutRows,
           layoutColumns,
         },
@@ -825,6 +1200,7 @@ function App() {
       const data = await requestGeneration(accessToken, payload);
       setGenerationResult({
         ...data,
+        promptSnapshot: prompt,
         downloadName: buildDownloadName(),
         previewUrl: `data:${data.mimeType};base64,${data.imageBase64}`,
       });
@@ -835,6 +1211,289 @@ function App() {
     }
   }
 
+  async function handleEnhanceGeneration() {
+    if (!generationResult || !canEnhanceGeneration || !accessToken) {
+      return;
+    }
+
+    setEnhancePending(true);
+    setStudioError("");
+
+    try {
+      const payload = {
+        modelId: generationResult.bananaModelId,
+        prompt: generationResult.promptSnapshot || prompt,
+        sourceImage: {
+          name: `enhance-source-${generationResult.savedRecord?.id || "current"}.png`,
+          mimeType: generationResult.mimeType,
+          data: generationResult.imageBase64,
+        },
+        imageOptions: {
+          aspectRatio: generationResult.aspectRatio || selectedAspectRatio,
+          imageSize: enhancementTargetImageSize,
+          layoutRows: generationResult.layoutRows || layoutRows,
+          layoutColumns: generationResult.layoutColumns || layoutColumns,
+        },
+      };
+      const data = await requestEnhancement(accessToken, payload);
+
+      setGenerationResult((currentValue) => ({
+        ...(currentValue || {}),
+        ...data,
+        promptSnapshot: currentValue?.promptSnapshot || prompt,
+        downloadName: buildDownloadName(),
+        previewUrl: `data:${data.mimeType};base64,${data.imageBase64}`,
+      }));
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "提升清晰度失败");
+    } finally {
+      setEnhancePending(false);
+    }
+  }
+
+  function openImagePreview() {
+    if (!generationResult?.previewUrl) {
+      return;
+    }
+
+    setImagePreviewTransform({
+      scale: MIN_PREVIEW_SCALE,
+      x: 0,
+      y: 0,
+    });
+    setImagePreviewDragging(false);
+    imagePreviewPointersRef.current.clear();
+    imagePreviewPanRef.current = null;
+    imagePreviewPinchRef.current = null;
+    setImagePreviewViewportSize({
+      width: typeof window !== "undefined" ? window.innerWidth : 0,
+      height: typeof window !== "undefined" ? window.innerHeight : 0,
+    });
+    setImagePreviewOpen(true);
+  }
+
+  function closeImagePreview() {
+    setImagePreviewOpen(false);
+    setImagePreviewDragging(false);
+    imagePreviewPointersRef.current.clear();
+    imagePreviewPanRef.current = null;
+    imagePreviewPinchRef.current = null;
+  }
+
+  function getPreviewRelativePoint(clientPoint) {
+    const viewport = imagePreviewViewportRef.current;
+
+    if (!viewport) {
+      return null;
+    }
+
+    const rect = viewport.getBoundingClientRect();
+
+    return {
+      x: clientPoint.x - rect.left - rect.width / 2,
+      y: clientPoint.y - rect.top - rect.height / 2,
+    };
+  }
+
+  function getPreviewImagePoint(clientPoint, transform = imagePreviewTransform) {
+    const relativePoint = getPreviewRelativePoint(clientPoint);
+
+    if (!relativePoint) {
+      return null;
+    }
+
+    return {
+      x: (relativePoint.x - transform.x) / transform.scale,
+      y: (relativePoint.y - transform.y) / transform.scale,
+    };
+  }
+
+  function applyPreviewScale(nextScaleInput, anchorClientPoint = null) {
+    setImagePreviewTransform((currentValue) => {
+      const nextScale = clampPreviewScale(nextScaleInput);
+
+      if (nextScale === currentValue.scale) {
+        return currentValue;
+      }
+
+      if (!anchorClientPoint) {
+        return {
+          scale: nextScale,
+          x: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.x,
+          y: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.y,
+        };
+      }
+
+      const anchorPoint = getPreviewRelativePoint(anchorClientPoint);
+
+      if (!anchorPoint) {
+        return {
+          scale: nextScale,
+          x: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.x,
+          y: nextScale === MIN_PREVIEW_SCALE ? 0 : currentValue.y,
+        };
+      }
+
+      const scaleRatio = nextScale / currentValue.scale;
+      const nextX = anchorPoint.x - (anchorPoint.x - currentValue.x) * scaleRatio;
+      const nextY = anchorPoint.y - (anchorPoint.y - currentValue.y) * scaleRatio;
+
+      return {
+        scale: nextScale,
+        x: nextScale === MIN_PREVIEW_SCALE ? 0 : nextX,
+        y: nextScale === MIN_PREVIEW_SCALE ? 0 : nextY,
+      };
+    });
+  }
+
+  function handleImagePreviewWheel(event) {
+    const delta = event.deltaY < 0 ? 0.24 : -0.24;
+    applyPreviewScale(imagePreviewTransform.scale + delta, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function handleImagePreviewPointerDown(event) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    imagePreviewPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    if (imagePreviewPointersRef.current.size === 1) {
+      imagePreviewPanRef.current = {
+        startPointer: { x: event.clientX, y: event.clientY },
+        origin: {
+          x: imagePreviewTransform.x,
+          y: imagePreviewTransform.y,
+        },
+      };
+      return;
+    }
+
+    if (imagePreviewPointersRef.current.size === 2) {
+      const [firstPointer, secondPointer] = Array.from(
+        imagePreviewPointersRef.current.values(),
+      );
+      const midpoint = {
+        x: (firstPointer.x + secondPointer.x) / 2,
+        y: (firstPointer.y + secondPointer.y) / 2,
+      };
+      const anchorImagePoint = getPreviewImagePoint(midpoint);
+
+      if (!anchorImagePoint) {
+        return;
+      }
+
+      imagePreviewPinchRef.current = {
+        startDistance: Math.max(getPointerDistance(firstPointer, secondPointer), 1),
+        startScale: imagePreviewTransform.scale,
+        anchorImagePoint,
+      };
+      imagePreviewPanRef.current = null;
+    }
+  }
+
+  function handleImagePreviewPointerMove(event) {
+    if (!imagePreviewPointersRef.current.has(event.pointerId)) {
+      return;
+    }
+
+    imagePreviewPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    if (imagePreviewPointersRef.current.size >= 2 && imagePreviewPinchRef.current) {
+      const [firstPointer, secondPointer] = Array.from(
+        imagePreviewPointersRef.current.values(),
+      );
+      const midpoint = {
+        x: (firstPointer.x + secondPointer.x) / 2,
+        y: (firstPointer.y + secondPointer.y) / 2,
+      };
+      const midpointRelativePoint = getPreviewRelativePoint(midpoint);
+
+      if (!midpointRelativePoint) {
+        return;
+      }
+
+      const nextScale = clampPreviewScale(
+        imagePreviewPinchRef.current.startScale *
+          (getPointerDistance(firstPointer, secondPointer) /
+            imagePreviewPinchRef.current.startDistance),
+      );
+
+      setImagePreviewTransform({
+        scale: nextScale,
+        x:
+          nextScale === MIN_PREVIEW_SCALE
+            ? 0
+            : midpointRelativePoint.x -
+              imagePreviewPinchRef.current.anchorImagePoint.x * nextScale,
+        y:
+          nextScale === MIN_PREVIEW_SCALE
+            ? 0
+            : midpointRelativePoint.y -
+              imagePreviewPinchRef.current.anchorImagePoint.y * nextScale,
+      });
+      setImagePreviewDragging(true);
+      return;
+    }
+
+    if (!imagePreviewPanRef.current || imagePreviewTransform.scale <= MIN_PREVIEW_SCALE) {
+      return;
+    }
+
+    const currentPan = imagePreviewPanRef.current;
+
+    if (!currentPan) {
+      return;
+    }
+
+    setImagePreviewTransform((currentValue) => ({
+      ...currentValue,
+      x:
+        currentPan.origin.x +
+        (event.clientX - currentPan.startPointer.x),
+      y:
+        currentPan.origin.y +
+        (event.clientY - currentPan.startPointer.y),
+    }));
+    setImagePreviewDragging(true);
+  }
+
+  function handleImagePreviewPointerEnd(event) {
+    imagePreviewPointersRef.current.delete(event.pointerId);
+
+    if (imagePreviewPointersRef.current.size < 2) {
+      imagePreviewPinchRef.current = null;
+    }
+
+    if (imagePreviewPointersRef.current.size === 1) {
+      const [remainingPointer] = Array.from(imagePreviewPointersRef.current.values());
+      imagePreviewPanRef.current = {
+        startPointer: remainingPointer,
+        origin: {
+          x: imagePreviewTransform.x,
+          y: imagePreviewTransform.y,
+        },
+      };
+    } else {
+      imagePreviewPanRef.current = null;
+    }
+
+    if (imagePreviewPointersRef.current.size === 0) {
+      setImagePreviewDragging(false);
+    }
+  }
+
   if (sessionState === "checking") {
     return (
       <div className="page-shell">
@@ -842,6 +1501,21 @@ function App() {
           <p className="eyebrow">BANANA ACCESS</p>
           <h1>正在恢复访问状态</h1>
           <p>如果提取凭证仍有效，会自动进入 banana 工作台。</p>
+          {generationResult ? (
+            <div className="restored-result-card">
+              <div className="restored-result-copy">
+                <strong>已恢复上次结果</strong>
+                <span>
+                  {generationResult.imageSize || "已保存"} · {generationResult.aspectRatio || "原图"}
+                </span>
+              </div>
+              <img
+                className="restored-result-image"
+                src={generationResult.previewUrl}
+                alt="Restored Banana result"
+              />
+            </div>
+          ) : null}
         </main>
       </div>
     );
@@ -886,6 +1560,28 @@ function App() {
               当前链接参数自动填入值：
               <strong>{readSearchParam("pw") || "未提供"}</strong>
             </p>
+            {generationResult ? (
+              <div className="restored-result-card">
+                <div className="restored-result-copy">
+                  <strong>已恢复上次结果</strong>
+                  <span>
+                    即使误关页面，这张图也会保存在当前浏览器里。
+                  </span>
+                </div>
+                <img
+                  className="restored-result-image"
+                  src={generationResult.previewUrl}
+                  alt="Restored Banana result"
+                />
+                <a
+                  className="download-link restored-result-download"
+                  href={generationResult.previewUrl}
+                  download={generationResult.downloadName}
+                >
+                  下载上次图片
+                </a>
+              </div>
+            ) : null}
           </section>
         </main>
       </div>
@@ -914,11 +1610,38 @@ function App() {
 
           {generationResult ? (
             <div className="result-card">
-              <img
-                className="result-image"
-                src={generationResult.previewUrl}
-                alt="Banana generated result"
-              />
+              <div className="result-toolbar">
+                {generationResult.imageSize ? (
+                  <span className="result-chip">
+                    {generationResult.imageSize} · {generationResult.aspectRatio}
+                  </span>
+                ) : null}
+                {canEnhanceGeneration ? (
+                  <button
+                    type="button"
+                    className="enhance-button"
+                    onClick={handleEnhanceGeneration}
+                    disabled={enhancePending || studioPending}
+                  >
+                    {enhancePending
+                      ? `提升到 ${enhancementTargetImageSize} 中...`
+                      : "提升清晰度"}
+                  </button>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                className="result-image-button"
+                onClick={openImagePreview}
+                aria-label="打开图片预览"
+              >
+                <img
+                  className="result-image"
+                  src={generationResult.previewUrl}
+                  alt="Banana generated result"
+                  draggable="false"
+                />
+              </button>
               <a
                 className="download-link"
                 href={generationResult.previewUrl}
@@ -935,12 +1658,52 @@ function App() {
           )}
         </section>
 
-        <section className="studio-panel">
-
-          <form className="prompt-form" onSubmit={handleGenerate}>
-            <label className="field-label" htmlFor="prompt">
-              文本要求
-            </label>
+        <section
+          className={`studio-panel prompt-panel${promptMode === "focus" ? " is-focus-mode" : ""}`}
+        >
+          <form
+            className={`prompt-form${promptMode === "focus" ? " is-focus-mode" : ""}`}
+            onSubmit={handleGenerate}
+          >
+            <div className="prompt-field-header">
+              <label className="field-label" htmlFor="prompt">
+                文本要求
+              </label>
+              <button
+                type="button"
+                className={`prompt-mode-button${promptMode === "focus" ? " is-active" : ""}`}
+                onClick={togglePromptMode}
+                aria-label={promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
+                title={promptMode === "focus" ? "退出专注输入" : "进入专注输入"}
+              >
+                <span className="sr-only">
+                  {promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
+                </span>
+                {promptMode === "focus" ? (
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M7 3H3v4" />
+                    <path d="M13 3h4v4" />
+                    <path d="M17 13v4h-4" />
+                    <path d="M3 13v4h4" />
+                    <path d="M3 7l5-4" />
+                    <path d="M17 7l-5-4" />
+                    <path d="M17 13l-5 4" />
+                    <path d="M3 13l5 4" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M7 3H3v4" />
+                    <path d="M13 3h4v4" />
+                    <path d="M17 13v4h-4" />
+                    <path d="M3 13v4h4" />
+                    <path d="M3 7l5 5" />
+                    <path d="M17 7l-5 5" />
+                    <path d="M17 13l-5-5" />
+                    <path d="M3 13l5-5" />
+                  </svg>
+                )}
+              </button>
+            </div>
             <textarea
               ref={promptTextareaRef}
               id="prompt"
@@ -948,202 +1711,351 @@ function App() {
               rows={PROMPT_TEXTAREA_MIN_ROWS}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (promptMode === "focus" && event.key === "Escape") {
+                  event.preventDefault();
+                  setPromptMode("simple");
+                }
+              }}
               placeholder="描述你想要的 banana 画面、风格、镜头、材质、色调和构图"
             />
 
-            <label
-              className={`upload-box${uploadDragActive ? " is-drag-active" : ""}`}
-              htmlFor="referenceImages"
-              onDragOver={handleUploadDragOver}
-              onDragLeave={handleUploadDragLeave}
-              onDrop={handleUploadDrop}
-            >
-              <input
-                id="referenceImages"
-                name="referenceImages"
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={handleFileChange}
-              />
-              <span>点击或拖拽上传参考图片</span>
-              <small>支持多图上传</small>
-            </label>
+            {promptMode === "focus" ? (
+              <div className="focus-mode-note">按 `Esc` 也可以退出专注输入。</div>
+            ) : null}
 
-            {referenceImages.length > 0 ? (
+            {promptMode !== "focus" ? (
               <>
-                <DragDropContext
-                  onDragStart={handleReferenceDragStart}
-                  onDragUpdate={handleReferenceDragUpdate}
-                  onDragEnd={handleReferenceDragEnd}
+                <label
+                  className={`upload-box${uploadDragActive ? " is-drag-active" : ""}`}
+                  htmlFor="referenceImages"
+                  onDragOver={handleUploadDragOver}
+                  onDragLeave={handleUploadDragLeave}
+                  onDrop={handleUploadDrop}
                 >
-                  <Droppable
-                    droppableId="reference-images"
-                    direction="horizontal"
-                    ignoreContainerClipping
-                    renderClone={(provided, snapshot, rubric) => {
-                      const cloneImage = referenceImages[rubric.source.index];
+                  <input
+                    id="referenceImages"
+                    name="referenceImages"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleFileChange}
+                  />
+                  <span>点击或拖拽上传参考图片</span>
+                  <small>支持多图上传</small>
+                </label>
 
-                      if (!cloneImage) {
-                        return null;
-                      }
+                {referenceImages.length > 0 ? (
+                  <>
+                    <DragDropContext
+                      onDragStart={handleReferenceDragStart}
+                      onDragUpdate={handleReferenceDragUpdate}
+                      onDragEnd={handleReferenceDragEnd}
+                    >
+                      <Droppable
+                        droppableId="reference-images"
+                        direction="horizontal"
+                        ignoreContainerClipping
+                        renderClone={(provided, snapshot, rubric) => {
+                          const cloneImage = referenceImages[rubric.source.index];
 
-                      return (
-                        <div
-                          ref={provided.innerRef}
-                          className="reference-item reference-item-clone"
-                          style={provided.draggableProps.style}
-                          {...provided.draggableProps}
-                          {...provided.dragHandleProps}
-                        >
-                          <ReferenceCard
-                            image={cloneImage}
-                            index={rubric.source.index}
-                            onRemove={handleRemoveReferenceImage}
-                            isDragging
-                          />
-                        </div>
-                      );
-                    }}
-                  >
-                    {(provided) => (
-                      <div
-                        ref={(node) => {
-                          provided.innerRef(node);
-                          referenceGridRef.current = node;
+                          if (!cloneImage) {
+                            return null;
+                          }
+
+                          return (
+                            <div
+                              ref={provided.innerRef}
+                              className="reference-item reference-item-clone"
+                              style={provided.draggableProps.style}
+                              {...provided.draggableProps}
+                              {...provided.dragHandleProps}
+                            >
+                              <ReferenceCard
+                                image={cloneImage}
+                                index={rubric.source.index}
+                                onRemove={handleRemoveReferenceImage}
+                                isDragging
+                              />
+                            </div>
+                          );
                         }}
-                        className={`reference-grid${referenceDragActive ? " is-dragging" : ""}`}
-                        {...provided.droppableProps}
                       >
-                        {referenceImages.map((image, index) => (
-                          <Draggable
-                            key={image.id}
-                            draggableId={image.id}
-                            index={index}
-                            disableInteractiveElementBlocking
+                        {(provided) => (
+                          <div
+                            ref={(node) => {
+                              provided.innerRef(node);
+                              referenceGridRef.current = node;
+                            }}
+                            className={`reference-grid${referenceDragActive ? " is-dragging" : ""}`}
+                            {...provided.droppableProps}
                           >
-                            {(draggableProvided, snapshot) => (
-                              <div
-                                ref={draggableProvided.innerRef}
-                                data-reference-id={image.id}
-                                className={`reference-item${snapshot.isDragging ? " is-dragging" : ""}`}
-                                style={draggableProvided.draggableProps.style}
-                                {...draggableProvided.draggableProps}
-                                {...draggableProvided.dragHandleProps}
+                            {referenceImages.map((image, index) => (
+                              <Draggable
+                                key={image.id}
+                                draggableId={image.id}
+                                index={index}
+                                disableInteractiveElementBlocking
                               >
-                                <ReferenceCard
-                                  image={image}
-                                  index={index}
-                                  onRemove={handleRemoveReferenceImage}
-                                  isDragging={snapshot.isDragging}
-                                />
-                              </div>
-                            )}
-                          </Draggable>
+                                {(draggableProvided, snapshot) => (
+                                  <div
+                                    ref={draggableProvided.innerRef}
+                                    data-reference-id={image.id}
+                                    className={`reference-item${snapshot.isDragging ? " is-dragging" : ""}`}
+                                    style={draggableProvided.draggableProps.style}
+                                    {...draggableProvided.draggableProps}
+                                    {...draggableProvided.dragHandleProps}
+                                  >
+                                    <ReferenceCard
+                                      image={image}
+                                      index={index}
+                                      onRemove={handleRemoveReferenceImage}
+                                      isDragging={snapshot.isDragging}
+                                    />
+                                  </div>
+                                )}
+                              </Draggable>
+                            ))}
+                            {provided.placeholder}
+                          </div>
+                        )}
+                      </Droppable>
+                    </DragDropContext>
+                  </>
+                ) : null}
+
+                <label className="field-label field-label-inline" htmlFor="bananaModelSelector">
+                  <span>底模选择</span>
+                  {selectedModel ? (
+                    <small className="model-helper-text">{selectedModel.description}</small>
+                  ) : null}
+                </label>
+                <select
+                  id="bananaModelSelector"
+                  name="bananaModelSelector"
+                  className="model-selector"
+                  value={selectedModelId}
+                  onChange={(event) => setSelectedModelId(event.target.value)}
+                >
+                  {models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name} · {model.priceLabel}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="layout-config-card">
+                  <div className="layout-control-row">
+                    <label className="image-option-field layout-select-field" htmlFor="aspectRatioSelector">
+                      <span className="field-label">图片比例</span>
+                      <select
+                        id="aspectRatioSelector"
+                        name="aspectRatioSelector"
+                        className="model-selector compact-selector"
+                        value={selectedAspectRatio}
+                        onChange={(event) => setSelectedAspectRatio(event.target.value)}
+                      >
+                        {availableAspectRatioOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
                         ))}
-                        {provided.placeholder}
-                      </div>
-                    )}
-                  </Droppable>
-                </DragDropContext>
+                      </select>
+                    </label>
+
+                    <label className="image-option-field image-size-field" htmlFor="imageSizeSelector">
+                      <span className="field-label">分辨率</span>
+                      <select
+                        id="imageSizeSelector"
+                        name="imageSizeSelector"
+                        className="model-selector compact-selector"
+                        value={selectedImageSize}
+                        onChange={(event) => setSelectedImageSize(event.target.value)}
+                      >
+                        {availableImageSizeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div className="layout-control-grid">
+                      <label className="image-option-field" htmlFor="layoutRows">
+                        <span className="field-label">行数</span>
+                        <input
+                          id="layoutRows"
+                          name="layoutRows"
+                          type="number"
+                          min="1"
+                          max={String(MAX_LAYOUT_TRACKS)}
+                          value={layoutRows}
+                          onChange={(event) =>
+                            setLayoutRows(clampLayoutTrack(event.target.value))
+                          }
+                        />
+                      </label>
+
+                      <label className="image-option-field" htmlFor="layoutColumns">
+                        <span className="field-label">列数</span>
+                        <input
+                          id="layoutColumns"
+                          name="layoutColumns"
+                          type="number"
+                          min="1"
+                          max={String(MAX_LAYOUT_TRACKS)}
+                          value={layoutColumns}
+                          onChange={(event) =>
+                            setLayoutColumns(clampLayoutTrack(event.target.value))
+                          }
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="layout-preview-shell">
+                    <div className="layout-preview-square">
+                      <canvas
+                        ref={handleLayoutCanvasMount}
+                        className="layout-preview-canvas"
+                        aria-label="布局预览"
+                      />
+                    </div>
+                  </div>
+                </div>
               </>
             ) : null}
 
-            <label className="field-label field-label-inline" htmlFor="bananaModelSelector">
-              <span>底模选择</span>
-              {selectedModel ? (
-                <small className="model-helper-text">{selectedModel.description}</small>
-              ) : null}
-            </label>
-            <select
-              id="bananaModelSelector"
-              name="bananaModelSelector"
-              className="model-selector"
-              value={selectedModelId}
-              onChange={(event) => setSelectedModelId(event.target.value)}
-            >
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name} · {model.priceLabel}
-                </option>
-              ))}
-            </select>
-
-            <div className="layout-config-card">
-              <div className="layout-control-row">
-                <label className="image-option-field layout-select-field" htmlFor="aspectRatioSelector">
-                  <span className="field-label">图片比例</span>
-                  <select
-                    id="aspectRatioSelector"
-                    name="aspectRatioSelector"
-                    className="model-selector compact-selector"
-                    value={selectedAspectRatio}
-                    onChange={(event) => setSelectedAspectRatio(event.target.value)}
-                  >
-                    {availableAspectRatioOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <div className="layout-control-grid">
-                  <label className="image-option-field" htmlFor="layoutRows">
-                    <span className="field-label">行数</span>
-                    <input
-                      id="layoutRows"
-                      name="layoutRows"
-                      type="number"
-                      min="1"
-                      max={String(MAX_LAYOUT_TRACKS)}
-                      value={layoutRows}
-                      onChange={(event) =>
-                        setLayoutRows(clampLayoutTrack(event.target.value))
-                      }
-                    />
-                  </label>
-
-                  <label className="image-option-field" htmlFor="layoutColumns">
-                    <span className="field-label">列数</span>
-                    <input
-                      id="layoutColumns"
-                      name="layoutColumns"
-                      type="number"
-                      min="1"
-                      max={String(MAX_LAYOUT_TRACKS)}
-                      value={layoutColumns}
-                      onChange={(event) =>
-                        setLayoutColumns(clampLayoutTrack(event.target.value))
-                      }
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div className="layout-preview-shell">
-                <div className="layout-preview-square">
-                  <canvas
-                    ref={handleLayoutCanvasMount}
-                    className="layout-preview-canvas"
-                    aria-label="布局预览"
-                  />
-                </div>
-              </div>
-            </div>
-
             {studioError ? <p className="error-text">{studioError}</p> : null}
 
-            <button
-              type="submit"
-              className="primary-button"
-              disabled={studioPending || !selectedModelId}
-            >
-              {studioPending ? "banana 正在生图..." : "开始生成"}
-            </button>
+            {promptMode !== "focus" ? (
+              <button
+                type="submit"
+                className="primary-button"
+                disabled={studioPending || !selectedModelId}
+              >
+                {studioPending ? "banana 正在生图..." : "开始生成"}
+              </button>
+            ) : null}
           </form>
         </section>
       </main>
+      {imagePreviewOpen && generationResult ? (
+        <div
+          className="image-preview-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="图片预览"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeImagePreview();
+            }
+          }}
+        >
+          <div className="image-preview-topbar">
+            <div className="image-preview-status">
+              <strong>图片预览</strong>
+              <span>{Math.round(imagePreviewTransform.scale * 100)}%</span>
+            </div>
+            <div className="image-preview-actions">
+              <a
+                className="image-preview-action"
+                href={generationResult.previewUrl}
+                download={generationResult.downloadName}
+              >
+                下载
+              </a>
+              <button
+                type="button"
+                className="image-preview-action"
+                onClick={() =>
+                  setImagePreviewTransform({
+                    scale: MIN_PREVIEW_SCALE,
+                    x: 0,
+                    y: 0,
+                  })
+                }
+              >
+                还原
+              </button>
+              <button
+                type="button"
+                className="image-preview-action image-preview-close"
+                onClick={closeImagePreview}
+              >
+                退出
+              </button>
+            </div>
+          </div>
+
+          <div
+            ref={imagePreviewViewportRef}
+            className={`image-preview-stage${imagePreviewDragging ? " is-dragging" : ""}`}
+            onWheel={handleImagePreviewWheel}
+            onPointerDown={handleImagePreviewPointerDown}
+            onPointerMove={handleImagePreviewPointerMove}
+            onPointerUp={handleImagePreviewPointerEnd}
+            onPointerCancel={handleImagePreviewPointerEnd}
+            onPointerLeave={handleImagePreviewPointerEnd}
+            onDoubleClick={(event) => {
+              const targetScale =
+                imagePreviewTransform.scale > MIN_PREVIEW_SCALE ? MIN_PREVIEW_SCALE : 2;
+
+              applyPreviewScale(targetScale, {
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
+          >
+            <img
+              className="image-preview-media"
+              src={generationResult.previewUrl}
+              alt="Banana generated preview"
+              draggable="false"
+              onLoad={(event) => {
+                setImagePreviewNaturalSize({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                });
+              }}
+              style={{
+                ...(imagePreviewBaseStyle || {}),
+                transform: `translate(${imagePreviewTransform.x}px, ${imagePreviewTransform.y}px) scale(${imagePreviewTransform.scale})`,
+              }}
+            />
+          </div>
+
+          <div className="image-preview-zoombar">
+            <button
+              type="button"
+              className="image-preview-action"
+              onClick={() => applyPreviewScale(imagePreviewTransform.scale - 0.4)}
+            >
+              -
+            </button>
+            <button
+              type="button"
+              className="image-preview-action"
+              onClick={() =>
+                setImagePreviewTransform({
+                  scale: MIN_PREVIEW_SCALE,
+                  x: 0,
+                  y: 0,
+                })
+              }
+            >
+              {Math.round(imagePreviewTransform.scale * 100)}%
+            </button>
+            <button
+              type="button"
+              className="image-preview-action"
+              onClick={() => applyPreviewScale(imagePreviewTransform.scale + 0.4)}
+            >
+              +
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

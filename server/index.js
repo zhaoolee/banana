@@ -28,13 +28,14 @@ const ALL_SUPPORTED_ASPECT_RATIOS = [
   "21:9",
 ];
 const SUPPORTED_ASPECT_RATIOS = new Set(ALL_SUPPORTED_ASPECT_RATIOS);
+const SUPPORTED_IMAGE_SIZES = new Set(["1K", "2K", "4K"]);
 const STANDARD_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
 const MAX_LAYOUT_TRACKS = 8;
 
 const BANANA_MODELS = [
   {
     id: "nano-banana",
-    name: "基础版",
+    name: "Gemini 2.5 Flash Image",
     tone: "官方 Nano Banana / Gemini 2.5 Flash Image",
     description: "价格最低，适合通用图像生成与基础编辑。",
     priceLabel: "$0.039/张",
@@ -44,14 +45,16 @@ const BANANA_MODELS = [
     promptBooster:
       "Use the capabilities of Gemini 2.5 Flash Image for versatile image generation and editing with solid prompt adherence.",
     supportedAspectRatios: STANDARD_ASPECT_RATIOS,
+    supportedImageSizes: ["1K"],
+    supportsImageSizeParam: false,
   },
   {
     id: "nano-banana-2",
-    name: "默认版",
+    name: "Gemini 3.1 Flash Image Preview",
     tone: "官方 Nano Banana 2 / Gemini 3.1 Flash Image",
     description: "当前默认推荐，速度、质量和能力更均衡。",
     priceLabel: "$0.067/张",
-    priceNote: "标准 1K 参考价",
+    priceNote: "支持 1K / 2K / 4K",
     providerModel:
       process.env.GEMINI_MODEL_NANO_BANANA_2?.trim() ||
       process.env.GEMINI_IMAGE_MODEL?.trim() ||
@@ -59,20 +62,24 @@ const BANANA_MODELS = [
     promptBooster:
       "Use the latest Gemini 3.1 Flash Image generation and editing behavior for fast, strong all-around image output.",
     supportedAspectRatios: ALL_SUPPORTED_ASPECT_RATIOS,
+    supportedImageSizes: ["1K", "2K", "4K"],
+    supportsImageSizeParam: true,
   },
   {
     id: "nano-banana-pro",
-    name: "Pro版",
+    name: "Gemini 3 Pro Image Preview",
     tone: "官方 Nano Banana Pro / Gemini 3 Pro Image",
     description: "价格最高，适合复杂场景、高精度控制和更强文字遵循。",
-    priceLabel: "$0.134/张",
-    priceNote: "标准 1K/2K 参考价",
+    priceLabel: "$0.134/张起",
+    priceNote: "支持 1K / 2K / 4K",
     providerModel:
       process.env.GEMINI_MODEL_NANO_BANANA_PRO?.trim() ||
       "gemini-3-pro-image-preview",
     promptBooster:
       "Use the advanced reasoning and precision of Gemini 3 Pro Image to maximize control, detail, and prompt fidelity.",
     supportedAspectRatios: STANDARD_ASPECT_RATIOS,
+    supportedImageSizes: ["1K", "2K", "4K"],
+    supportsImageSizeParam: true,
   },
 ];
 
@@ -212,6 +219,11 @@ function sanitizeReferenceImages(input) {
   });
 }
 
+function sanitizeSourceImage(input) {
+  const [sourceImage] = sanitizeReferenceImages(input ? [input] : []);
+  return sourceImage || null;
+}
+
 function sanitizeLayoutGuideImage(input) {
   if (!input || typeof input !== "object") {
     return null;
@@ -346,11 +358,20 @@ function sanitizeImageOptions(input, bananaModel) {
     Math.max(Number.parseInt(String(input?.layoutColumns || "1"), 10) || 1, 1),
     MAX_LAYOUT_TRACKS,
   );
+  const allowedImageSizes = Array.isArray(bananaModel?.supportedImageSizes) && bananaModel.supportedImageSizes.length > 0
+    ? bananaModel.supportedImageSizes.filter((value) => SUPPORTED_IMAGE_SIZES.has(value))
+    : ["1K"];
+  const fallbackImageSize = allowedImageSizes[0] || "1K";
+  const imageSize =
+    typeof input?.imageSize === "string" && allowedImageSizes.includes(input.imageSize)
+      ? input.imageSize
+      : fallbackImageSize;
 
   return {
     aspectRatio,
     layoutRows,
     layoutColumns,
+    imageSize,
   };
 }
 
@@ -360,6 +381,7 @@ function buildGeminiPrompt({
   referenceImages,
   imageOptions,
   hasLayoutGuideImage,
+  additionalInstructions = [],
 }) {
   const referenceHint =
     referenceImages.length > 0
@@ -381,10 +403,12 @@ function buildGeminiPrompt({
     referenceHint,
     layoutGuideHint,
     `Preferred aspect ratio: ${imageOptions.aspectRatio}.`,
+    `Preferred output resolution: ${imageOptions.imageSize}.`,
     `Preferred layout grid: ${imageOptions.layoutRows} rows by ${imageOptions.layoutColumns} columns.`,
     layoutRule,
     "When composing collages, panels, or multi-scene layouts, respect the requested grid structure exactly.",
     "Prefer coherent composition, clear focal subject, refined lighting, and high visual quality.",
+    ...additionalInstructions,
     `User request: ${prompt}`,
   ].join("\n");
 }
@@ -395,6 +419,7 @@ async function generateImageWithGemini({
   referenceImages,
   imageOptions,
   layoutGuideImage,
+  additionalInstructions = [],
 }) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
 
@@ -410,6 +435,7 @@ async function generateImageWithGemini({
     referenceImages,
     imageOptions,
     hasLayoutGuideImage: Boolean(layoutGuideImage),
+    additionalInstructions,
   });
   const requestBody = {
     contents: [
@@ -450,6 +476,9 @@ async function generateImageWithGemini({
       responseModalities: ["TEXT", "IMAGE"],
       imageConfig: {
         aspectRatio: imageOptions.aspectRatio,
+        ...(bananaModel.supportsImageSizeParam
+          ? { imageSize: imageOptions.imageSize }
+          : {}),
       },
     },
   };
@@ -584,6 +613,7 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       bananaModelPriceNote: bananaModel.priceNote,
       providerModel: result.providerModel,
       aspectRatio: imageOptions.aspectRatio,
+      imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
       layoutColumns: imageOptions.layoutColumns,
       savedRecord,
@@ -594,6 +624,71 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "banana 生图失败";
     console.error("Generate request failed:", error);
+    response.status(500).json({ error: message });
+  }
+});
+
+app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
+  try {
+    const prompt = normalizePrompt(request.body?.prompt);
+
+    if (!prompt) {
+      response.status(400).json({ error: "缺少原始提示词，无法提升清晰度" });
+      return;
+    }
+
+    const bananaModel = resolveBananaModel(request.body?.modelId);
+    const sourceImage = sanitizeSourceImage(request.body?.sourceImage);
+
+    if (!sourceImage) {
+      response.status(400).json({ error: "缺少原始结果图，无法提升清晰度" });
+      return;
+    }
+
+    const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
+    const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+    const result = await generateImageWithGemini({
+      bananaModel,
+      prompt,
+      referenceImages: [sourceImage],
+      imageOptions,
+      layoutGuideImage,
+      additionalInstructions: [
+        "The uploaded reference image is the previously generated low-resolution result.",
+        "Preserve the composition, panel layout, subject identity, perspective, scene structure, and text placement as closely as possible.",
+        "Increase visual clarity, local detail, edge fidelity, and legibility only. Do not redesign the image or change the arrangement.",
+      ],
+    });
+    const savedRecord = await saveGenerationArtifacts({
+      bananaModel,
+      imageOptions,
+      userPrompt: prompt,
+      geminiPrompt: result.geminiPrompt,
+      modelOutputText: result.text,
+      resultImageBase64: result.imageBase64,
+      resultMimeType: result.mimeType,
+    });
+
+    response.json({
+      ok: true,
+      bananaModelId: bananaModel.id,
+      bananaModelName: bananaModel.name,
+      bananaModelTone: bananaModel.tone,
+      bananaModelPriceLabel: bananaModel.priceLabel,
+      bananaModelPriceNote: bananaModel.priceNote,
+      providerModel: result.providerModel,
+      aspectRatio: imageOptions.aspectRatio,
+      imageSize: imageOptions.imageSize,
+      layoutRows: imageOptions.layoutRows,
+      layoutColumns: imageOptions.layoutColumns,
+      savedRecord,
+      mimeType: result.mimeType,
+      imageBase64: result.imageBase64,
+      text: result.text,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "提升清晰度失败";
+    console.error("Enhance request failed:", error);
     response.status(500).json({ error: message });
   }
 });

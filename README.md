@@ -24,8 +24,10 @@ PORT=3001
 
 - `GEMINI_API_KEY` 由后端读取
 - `ACCESS_PASSWORD` 是提取码
-- 3 个底模分别映射到 `Nano Banana`、`Nano Banana Pro`、`Nano Banana 2`
+- 3 个底模分别映射到 `gemini-2.5-flash-image`、`gemini-3.1-flash-image-preview`、`gemini-3-pro-image-preview`
 - 如需调整实际调用的 Gemini model id，可以修改对应的 `GEMINI_MODEL_*` 环境变量
+- `gemini-3.1-flash-image-preview` 与 `gemini-3-pro-image-preview` 支持前端分辨率选择 `1K / 2K / 4K`
+- `gemini-2.5-flash-image` 当前只支持固定 `1K`
 - 每次成功生成后，后端会自动把结果图、输入提示词、输出文本和元数据保存到 `storage/generations/`
 
 ## Docker 开发
