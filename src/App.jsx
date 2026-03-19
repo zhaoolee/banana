@@ -13,6 +13,8 @@ const PROMPT_STORAGE_KEY = "banana.prompt";
 const LAST_GENERATION_DB_NAME = "banana.studio";
 const LAST_GENERATION_STORE_NAME = "app";
 const LAST_GENERATION_RECORD_KEY = "lastGenerationResult";
+const GENERATION_LIBRARY_RECORDS_KEY = "generationLibraryRecords";
+const LAST_GENERATION_RECORD_ID_KEY = "lastGenerationRecordId";
 const MAX_REFERENCE_IMAGES = 12;
 const MAX_LAYOUT_TRACKS = 8;
 const PROMPT_TEXTAREA_MIN_ROWS = 2;
@@ -42,10 +44,20 @@ const IMAGE_SIZE_OPTIONS = [
 const SUPPORTED_IMAGE_SIZE_VALUES = new Set(IMAGE_SIZE_OPTIONS.map((option) => option.value));
 const MIN_PREVIEW_SCALE = 1;
 const MAX_PREVIEW_SCALE = 6;
+const SSE_CONNECT_TIMEOUT_MS = 20 * 1000;
+const SSE_INACTIVITY_TIMEOUT_MS = 90 * 1000;
 const generationResultStorage = localforage.createInstance({
   name: LAST_GENERATION_DB_NAME,
   storeName: LAST_GENERATION_STORE_NAME,
 });
+
+function createPersistedRecordId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function normalizeAspectRatioValue(value) {
   return SUPPORTED_ASPECT_RATIO_VALUES.has(value) ? value : "1:1";
@@ -363,6 +375,127 @@ function buildDownloadName() {
   return `banana-${datePart}-${timePart}.png`;
 }
 
+function formatPersistedAt(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "刚刚保存";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function buildGalleryDateKey(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "unknown";
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isSameLocalDay(firstValue, secondValue) {
+  return buildGalleryDateKey(firstValue) === buildGalleryDateKey(secondValue);
+}
+
+function isWithinRecentDays(value, days) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));
+  return date >= start;
+}
+
+function isCurrentMonth(value) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+}
+
+function getFinderFilterDefinitions(records) {
+  return [
+    {
+      id: "all",
+      label: "全部图片",
+      count: records.length,
+      predicate: () => true,
+    },
+    {
+      id: "today",
+      label: "今天",
+      count: records.filter((record) => isSameLocalDay(record.persistedAt, new Date())).length,
+      predicate: (record) => isSameLocalDay(record.persistedAt, new Date()),
+    },
+    {
+      id: "recent",
+      label: "最近 7 天",
+      count: records.filter((record) => isWithinRecentDays(record.persistedAt, 7)).length,
+      predicate: (record) => isWithinRecentDays(record.persistedAt, 7),
+    },
+    {
+      id: "month",
+      label: "本月",
+      count: records.filter((record) => isCurrentMonth(record.persistedAt)).length,
+      predicate: (record) => isCurrentMonth(record.persistedAt),
+    },
+  ];
+}
+
+function estimateBase64Size(base64 = "") {
+  if (!base64) {
+    return 0;
+  }
+
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 KB";
+  }
+
+  if (bytes < 1024 * 1024) {
+    const value = bytes / 1024;
+    return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} KB`;
+  }
+
+  const value = bytes / (1024 * 1024);
+  return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} MB`;
+}
+
+function secondsToEstimateMs(seconds) {
+  return Math.max(1000, Math.round(seconds * 1000));
+}
+
+function formatStreamPreviewText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+
+  if (!text) {
+    return "";
+  }
+
+  return text.length > 140 ? `${text.slice(0, 140)}...` : text;
+}
+
 async function parseJsonResponse(response) {
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
@@ -429,30 +562,176 @@ async function verifyPassword(password) {
   return parseJsonResponse(response);
 }
 
-async function requestGeneration(accessToken, payload) {
-  const response = await fetch("/api/generate", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(payload),
-  });
+async function requestSseJsonStream(accessToken, endpoint, payload, handlers = {}) {
+  const abortController = new AbortController();
+  let timeoutId = 0;
+  let hasReceivedEvent = false;
 
-  return parseJsonResponse(response);
+  function clearStreamTimeout() {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+      timeoutId = 0;
+    }
+  }
+
+  function armStreamTimeout() {
+    clearStreamTimeout();
+    timeoutId = window.setTimeout(() => {
+      abortController.abort(
+        hasReceivedEvent
+          ? new Error("后端长时间没有继续返回状态，已停止等待。请重试，并查看后端日志。")
+          : new Error("连接后端超时，请确认当前前后端服务仍在运行。"),
+      );
+    }, hasReceivedEvent ? SSE_INACTIVITY_TIMEOUT_MS : SSE_CONNECT_TIMEOUT_MS);
+  }
+
+  function handleSseEvent(eventName, data) {
+    hasReceivedEvent = true;
+    armStreamTimeout();
+
+    if (eventName === "status") {
+      handlers.onStatus?.(data);
+      return null;
+    }
+
+    if (eventName === "text") {
+      handlers.onText?.(data);
+      return null;
+    }
+
+    if (eventName === "error") {
+      throw new Error(data?.error || "请求失败，请稍后再试");
+    }
+
+    if (eventName === "result") {
+      return data;
+    }
+
+    return null;
+  }
+
+  function drainSseBuffer(currentBuffer, flush = false) {
+    let nextBuffer = currentBuffer;
+    let nextFinalResult = null;
+
+    while (nextBuffer.includes("\n\n")) {
+      const boundaryIndex = nextBuffer.indexOf("\n\n");
+      const rawEvent = nextBuffer.slice(0, boundaryIndex);
+      nextBuffer = nextBuffer.slice(boundaryIndex + 2);
+
+      const eventMatch = rawEvent.match(/^event:\s*(.+)$/m);
+      const eventName = eventMatch?.[1]?.trim() || "message";
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length === 0) {
+        continue;
+      }
+
+      const eventResult = handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
+
+      if (eventResult) {
+        nextFinalResult = eventResult;
+      }
+    }
+
+    if (flush && nextBuffer.trim()) {
+      const eventMatch = nextBuffer.match(/^event:\s*(.+)$/m);
+      const eventName = eventMatch?.[1]?.trim() || "message";
+      const dataLines = nextBuffer
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length > 0) {
+        const eventResult = handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
+
+        if (eventResult) {
+          nextFinalResult = eventResult;
+        }
+      }
+
+      nextBuffer = "";
+    }
+
+    return {
+      buffer: nextBuffer,
+      finalResult: nextFinalResult,
+    };
+  }
+
+  armStreamTimeout();
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+      signal: abortController.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      clearStreamTimeout();
+      return parseJsonResponse(response);
+    }
+
+    const decoder = new TextDecoder();
+    const reader = response.body.getReader();
+    let buffer = "";
+    let finalResult = null;
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+
+        if (done) {
+          const drained = drainSseBuffer(buffer, true);
+          buffer = drained.buffer;
+          finalResult = drained.finalResult || finalResult;
+          break;
+        }
+
+        armStreamTimeout();
+        buffer += decoder.decode(value, { stream: true });
+
+        const drained = drainSseBuffer(buffer);
+        buffer = drained.buffer;
+        finalResult = drained.finalResult || finalResult;
+      }
+    } finally {
+      clearStreamTimeout();
+      reader.releaseLock();
+    }
+
+    if (!finalResult) {
+      throw new Error("流式请求已结束，但没有返回最终结果");
+    }
+
+    return finalResult;
+  } catch (error) {
+    clearStreamTimeout();
+
+    if (abortController.signal.aborted) {
+      throw abortController.signal.reason instanceof Error
+        ? abortController.signal.reason
+        : new Error("流式请求已中断");
+    }
+
+    throw error;
+  }
 }
 
-async function requestEnhancement(accessToken, payload) {
-  const response = await fetch("/api/enhance", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(payload),
-  });
+async function requestGeneration(accessToken, payload, handlers) {
+  return requestSseJsonStream(accessToken, "/api/generate/stream", payload, handlers);
+}
 
-  return parseJsonResponse(response);
+async function requestEnhancement(accessToken, payload, handlers) {
+  return requestSseJsonStream(accessToken, "/api/enhance/stream", payload, handlers);
 }
 
 function ReferenceCard({ image, index, onRemove, isDragging = false }) {
@@ -513,7 +792,9 @@ function buildPersistedGenerationResultRecord(generationResult) {
 
   return {
     ...persistedRecord,
-    persistedAt: new Date().toISOString(),
+    id: persistedRecord.id || createPersistedRecordId(),
+    persistedAt: persistedRecord.persistedAt || new Date().toISOString(),
+    downloadName: persistedRecord.downloadName || buildDownloadName(),
   };
 }
 
@@ -524,25 +805,145 @@ function restorePersistedGenerationResultRecord(record) {
 
   return {
     ...record,
+    id: record.id || createPersistedRecordId(),
+    persistedAt: record.persistedAt || new Date().toISOString(),
     previewUrl: `data:${record.mimeType};base64,${record.imageBase64}`,
     downloadName: record.downloadName || buildDownloadName(),
   };
 }
 
-async function readPersistedGenerationResult() {
-  const persistedRecord = await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY);
-  return restorePersistedGenerationResultRecord(persistedRecord);
+function buildGeneratedImageRecord(data, extraFields = {}) {
+  return restorePersistedGenerationResultRecord({
+    ...data,
+    ...extraFields,
+    id: createPersistedRecordId(),
+    persistedAt: new Date().toISOString(),
+    downloadName: buildDownloadName(),
+  });
 }
 
-async function writePersistedGenerationResult(generationResult) {
-  const persistedRecord = buildPersistedGenerationResultRecord(generationResult);
+async function readPersistedGenerationLibrary() {
+  const persistedRecords = await generationResultStorage.getItem(GENERATION_LIBRARY_RECORDS_KEY);
 
-  if (persistedRecord) {
-    await generationResultStorage.setItem(LAST_GENERATION_RECORD_KEY, persistedRecord);
+  if (!Array.isArray(persistedRecords)) {
+    return [];
+  }
+
+  return persistedRecords
+    .map(restorePersistedGenerationResultRecord)
+    .filter(Boolean);
+}
+
+async function writePersistedGenerationLibrary(records) {
+  const persistedRecords = records
+    .map(buildPersistedGenerationResultRecord)
+    .filter(Boolean);
+
+  if (persistedRecords.length > 0) {
+    await generationResultStorage.setItem(GENERATION_LIBRARY_RECORDS_KEY, persistedRecords);
     return;
   }
 
-  await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
+  await generationResultStorage.removeItem(GENERATION_LIBRARY_RECORDS_KEY);
+}
+
+async function writeLastGenerationRecordId(recordId) {
+  if (recordId) {
+    await generationResultStorage.setItem(LAST_GENERATION_RECORD_ID_KEY, recordId);
+    return;
+  }
+
+  await generationResultStorage.removeItem(LAST_GENERATION_RECORD_ID_KEY);
+}
+
+async function readPersistedGenerationArtifacts() {
+  let libraryRecords = await readPersistedGenerationLibrary();
+  let lastRecordId = await generationResultStorage.getItem(LAST_GENERATION_RECORD_ID_KEY);
+
+  if (!libraryRecords.length) {
+    const legacyRecord = await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY);
+    const restoredLegacyRecord = restorePersistedGenerationResultRecord(legacyRecord);
+
+    if (restoredLegacyRecord) {
+      libraryRecords = [restoredLegacyRecord];
+      lastRecordId = restoredLegacyRecord.id;
+      await Promise.all([
+        writePersistedGenerationLibrary(libraryRecords),
+        writeLastGenerationRecordId(restoredLegacyRecord.id),
+        generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY),
+      ]);
+    }
+  } else if (await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY)) {
+    await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
+  }
+
+  const currentRecord =
+    libraryRecords.find((record) => record.id === lastRecordId) || libraryRecords[0] || null;
+
+  if (currentRecord && currentRecord.id !== lastRecordId) {
+    await writeLastGenerationRecordId(currentRecord.id);
+  }
+
+  return {
+    libraryRecords,
+    currentRecord,
+  };
+}
+
+function ResourceCard({ record, onPreview, onDelete }) {
+  const promptSummary = record.promptSnapshot?.trim() || "这张图没有记录 prompt。";
+  const fileTitle = record.downloadName || `banana-${record.id}.png`;
+
+  return (
+    <article className="finder-item">
+      <button
+        type="button"
+        className="finder-item-preview"
+        onClick={() => onPreview(record)}
+        aria-label="查看本地图片"
+      >
+        <img src={record.previewUrl} alt="本地保存的 banana 图片" draggable="false" />
+      </button>
+      <div className="finder-item-toolbar">
+        <button type="button" className="finder-item-action" onClick={() => onPreview(record)}>
+          预览
+        </button>
+        <a className="finder-item-action" href={record.previewUrl} download={record.downloadName}>
+          下载
+        </a>
+        <button
+          type="button"
+          className="finder-item-action finder-item-action-danger"
+          onClick={() => onDelete(record.id)}
+        >
+          删除
+        </button>
+      </div>
+      <div className="finder-item-copy">
+        <strong title={fileTitle}>{fileTitle}</strong>
+        <span title={promptSummary}>
+          {record.imageSize || "已保存"}
+          {record.aspectRatio ? ` · ${record.aspectRatio}` : ""}
+          {" · "}
+          {formatBytes(estimateBase64Size(record.imageBase64))}
+        </span>
+        <small>{formatPersistedAt(record.persistedAt)}</small>
+      </div>
+    </article>
+  );
+}
+
+function FinderSidebarItem({ item, isActive, onSelect }) {
+  return (
+    <button
+      type="button"
+      className={`finder-sidebar-item${isActive ? " is-active" : ""}`}
+      onClick={() => onSelect(item.id)}
+    >
+      <span>{item.label}</span>
+      <strong>{item.count}</strong>
+    </button>
+  );
 }
 
 function App() {
@@ -579,8 +980,18 @@ function App() {
   const [studioError, setStudioError] = useState("");
   const [studioPending, setStudioPending] = useState(false);
   const [enhancePending, setEnhancePending] = useState(false);
+  const [backendRequestCount, setBackendRequestCount] = useState(0);
+  const [backendBusyLabel, setBackendBusyLabel] = useState("");
+  const [backendBusyEstimateMs, setBackendBusyEstimateMs] = useState(secondsToEstimateMs(18));
+  const [backendBusyStartedAt, setBackendBusyStartedAt] = useState(0);
+  const [backendBusyTickAt, setBackendBusyTickAt] = useState(0);
+  const [backendBusyStreamText, setBackendBusyStreamText] = useState("");
   const [generationResult, setGenerationResult] = useState(null);
+  const [generationLibrary, setGenerationLibrary] = useState([]);
+  const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
+  const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
   const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+  const [imagePreviewRecord, setImagePreviewRecord] = useState(null);
   const [imagePreviewDragging, setImagePreviewDragging] = useState(false);
   const [imagePreviewViewportSize, setImagePreviewViewportSize] = useState({
     width: 0,
@@ -605,34 +1016,148 @@ function App() {
   const imagePreviewPointersRef = useRef(new Map());
   const imagePreviewPanRef = useRef(null);
   const imagePreviewPinchRef = useRef(null);
-  const hasRestoredGenerationResultRef = useRef(false);
   const hasLayoutValues = Boolean(selectedAspectRatio && layoutRows > 0 && layoutColumns > 0);
+  const previewRecord = imagePreviewRecord || generationResult;
+  const isBackendBusy = backendRequestCount > 0;
+  const backendBusyElapsedMs =
+    isBackendBusy && backendBusyStartedAt
+      ? Math.max(0, backendBusyTickAt - backendBusyStartedAt)
+      : 0;
+  const backendBusyRemainingMs = Math.max(0, backendBusyEstimateMs - backendBusyElapsedMs);
+  const backendBusyRemainingSeconds = Math.ceil(backendBusyRemainingMs / 1000);
+  const backendBusyProgressValue =
+    backendBusyEstimateMs > 0
+      ? Math.min(backendBusyElapsedMs / backendBusyEstimateMs, 1)
+      : 0;
+  const finderFilters = useMemo(() => {
+    return getFinderFilterDefinitions(generationLibrary);
+  }, [generationLibrary]);
+  const activeFinderFilter = useMemo(() => {
+    return finderFilters.find((item) => item.id === resourceManagerFilter) || finderFilters[0] || null;
+  }, [finderFilters, resourceManagerFilter]);
+  const filteredGenerationLibrary = useMemo(() => {
+    if (!activeFinderFilter) {
+      return generationLibrary;
+    }
+
+    return generationLibrary.filter(activeFinderFilter.predicate);
+  }, [activeFinderFilter, generationLibrary]);
+  const backendBusyOverlay = isBackendBusy ? (
+    <div
+      className="request-busy-overlay"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div className="request-busy-halo" aria-hidden="true" />
+      <div className="request-busy-center">
+        <div className="request-busy-chip">
+          <div className="request-busy-row">
+            <div className="request-busy-copy">
+              <div className="request-busy-title">
+                <span className="request-busy-orb" aria-hidden="true" />
+                <strong>{backendBusyLabel || "banana 正在请求后端..."}</strong>
+              </div>
+              <span className="request-busy-meta">
+                {backendBusyRemainingSeconds > 0
+                  ? `预计还需 ${backendBusyRemainingSeconds} 秒`
+                  : "预计即将完成"}
+              </span>
+            </div>
+            <span className="request-busy-countdown">
+              {backendBusyRemainingSeconds > 0 ? `${backendBusyRemainingSeconds}s` : "0s"}
+            </span>
+          </div>
+          {backendBusyStreamText ? (
+            <p className="request-busy-streamtext">{backendBusyStreamText}</p>
+          ) : null}
+          <div
+            className={`request-busy-progress${backendBusyProgressValue >= 1 ? " is-complete" : ""}`}
+            aria-hidden="true"
+          >
+            <span
+              style={{
+                transform: `scaleX(${Math.max(backendBusyProgressValue, 0.04)})`,
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  function beginBackendRequest(label, estimateMs = secondsToEstimateMs(18)) {
+    const startedAt = Date.now();
+    setBackendBusyLabel(label || "banana 正在请求后端...");
+    setBackendBusyEstimateMs(estimateMs);
+    setBackendBusyStartedAt(startedAt);
+    setBackendBusyTickAt(startedAt);
+    setBackendBusyStreamText("");
+    setBackendRequestCount((currentValue) => currentValue + 1);
+
+    let released = false;
+
+    return () => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      setBackendRequestCount((currentValue) => Math.max(0, currentValue - 1));
+    };
+  }
 
   useEffect(() => {
     let cancelled = false;
 
-    async function restoreLastGenerationResult() {
+    async function restorePersistedImages() {
       try {
-        const persistedResult = await readPersistedGenerationResult();
+        const persistedArtifacts = await readPersistedGenerationArtifacts();
 
-        if (cancelled || !persistedResult) {
+        if (cancelled) {
           return;
         }
 
-        setGenerationResult(persistedResult);
+        setGenerationLibrary(persistedArtifacts.libraryRecords);
+        setGenerationResult(persistedArtifacts.currentRecord);
       } catch (error) {
         console.warn("Restore persisted generation result failed:", error);
-      } finally {
-        hasRestoredGenerationResultRef.current = true;
       }
     }
 
-    void restoreLastGenerationResult();
+    void restorePersistedImages();
 
     return () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (backendRequestCount !== 0 || !backendBusyLabel) {
+      return;
+    }
+
+    setBackendBusyLabel("");
+    setBackendBusyStartedAt(0);
+    setBackendBusyTickAt(0);
+    setBackendBusyStreamText("");
+  }, [backendBusyLabel, backendRequestCount]);
+
+  useEffect(() => {
+    if (!isBackendBusy) {
+      return;
+    }
+
+    setBackendBusyTickAt(Date.now());
+
+    const intervalId = window.setInterval(() => {
+      setBackendBusyTickAt(Date.now());
+    }, 250);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isBackendBusy]);
 
   useEffect(() => {
     if (!accessToken) {
@@ -643,6 +1168,11 @@ function App() {
     let cancelled = false;
 
     async function restoreSession() {
+      const releaseBackendRequest = beginBackendRequest(
+        "正在恢复访问状态...",
+        secondsToEstimateMs(3),
+      );
+
       try {
         const data = await fetchAccessSession(accessToken);
 
@@ -662,6 +1192,8 @@ function App() {
         setAccessToken("");
         setAccessExpiresAt("");
         setSessionState("locked");
+      } finally {
+        releaseBackendRequest();
       }
     }
 
@@ -680,6 +1212,11 @@ function App() {
     let cancelled = false;
 
     async function loadModels() {
+      const releaseBackendRequest = beginBackendRequest(
+        "正在加载 banana 模型...",
+        secondsToEstimateMs(4),
+      );
+
       try {
         const data = await fetchBananaModels(accessToken);
 
@@ -707,6 +1244,8 @@ function App() {
         }
 
         setStudioError(error instanceof Error ? error.message : "无法加载 banana 模型");
+      } finally {
+        releaseBackendRequest();
       }
     }
 
@@ -878,20 +1417,32 @@ function App() {
   }, [promptMode]);
 
   useEffect(() => {
-    if (!imagePreviewOpen || typeof window === "undefined" || typeof document === "undefined") {
+    if ((!imagePreviewOpen && !resourceManagerOpen) || typeof window === "undefined" || typeof document === "undefined") {
       return;
     }
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    setImagePreviewViewportSize({
-      width: window.innerWidth,
-      height: window.innerHeight,
-    });
+
+    if (imagePreviewOpen) {
+      setImagePreviewViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    }
 
     function handleKeyDown(event) {
       if (event.key === "Escape") {
-        setImagePreviewOpen(false);
+        if (imagePreviewOpen) {
+          closeImagePreview();
+          return;
+        }
+
+        setResourceManagerOpen(false);
+        return;
+      }
+
+      if (!imagePreviewOpen) {
         return;
       }
 
@@ -942,17 +1493,7 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", handleResize);
     };
-  }, [imagePreviewOpen]);
-
-  useEffect(() => {
-    if (!hasRestoredGenerationResultRef.current) {
-      return;
-    }
-
-    void writePersistedGenerationResult(generationResult).catch((error) => {
-      console.warn("Persist generation result failed:", error);
-    });
-  }, [generationResult]);
+  }, [imagePreviewOpen, resourceManagerOpen]);
 
   useEffect(() => {
     if (!imagePreviewOpen) {
@@ -972,12 +1513,16 @@ function App() {
     imagePreviewPointersRef.current.clear();
     imagePreviewPanRef.current = null;
     imagePreviewPinchRef.current = null;
-  }, [imagePreviewOpen, generationResult?.previewUrl]);
+  }, [imagePreviewOpen, previewRecord?.previewUrl]);
 
   async function handleVerifySubmit(event) {
     event.preventDefault();
     setAuthPending(true);
     setAuthError("");
+    const releaseBackendRequest = beginBackendRequest(
+      "正在校验提取码...",
+      secondsToEstimateMs(4),
+    );
 
     try {
       const data = await verifyPassword(password);
@@ -990,6 +1535,7 @@ function App() {
       setAuthError(error instanceof Error ? error.message : "提取码校验失败");
       setSessionState("locked");
     } finally {
+      releaseBackendRequest();
       setAuthPending(false);
     }
   }
@@ -1147,14 +1693,46 @@ function App() {
     });
   }
 
-  function handleLogout() {
-    writeSessionValue(ACCESS_TOKEN_STORAGE_KEY, "");
-    writeSessionValue(ACCESS_EXPIRES_STORAGE_KEY, "");
-    setAccessToken("");
-    setAccessExpiresAt("");
-    setSessionState("locked");
-    setGenerationResult(null);
-    setStudioError("");
+  async function persistGeneratedRecord(record) {
+    const nextLibraryRecords = [record, ...generationLibrary];
+
+    await Promise.all([
+      writePersistedGenerationLibrary(nextLibraryRecords),
+      writeLastGenerationRecordId(record.id),
+    ]);
+
+    setGenerationLibrary(nextLibraryRecords);
+  }
+
+  async function handleDeleteStoredRecord(recordId) {
+    const nextLibraryRecords = generationLibrary.filter((record) => record.id !== recordId);
+    const deletedCurrentResult = generationResult?.id === recordId;
+    const nextStoredCurrentRecord =
+      nextLibraryRecords.find((record) => record.id === generationResult?.id) ||
+      nextLibraryRecords[0] ||
+      null;
+    const nextCurrentRecord = deletedCurrentResult
+      ? nextLibraryRecords[0] || null
+      : generationResult || nextStoredCurrentRecord;
+
+    try {
+      await Promise.all([
+        writePersistedGenerationLibrary(nextLibraryRecords),
+        writeLastGenerationRecordId(nextStoredCurrentRecord?.id || ""),
+      ]);
+
+      setGenerationLibrary(nextLibraryRecords);
+      setGenerationResult(nextCurrentRecord);
+
+      if (
+        imagePreviewOpen &&
+        previewRecord?.id === recordId
+      ) {
+        closeImagePreview();
+      }
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "本地资源删除失败");
+    }
   }
 
   function togglePromptMode() {
@@ -1178,6 +1756,10 @@ function App() {
 
     setStudioPending(true);
     setStudioError("");
+    const releaseBackendRequest = beginBackendRequest(
+      "banana 正在生图...",
+      secondsToEstimateMs(26),
+    );
 
     try {
       const payload = {
@@ -1197,16 +1779,37 @@ function App() {
         })),
       };
 
-      const data = await requestGeneration(accessToken, payload);
-      setGenerationResult({
-        ...data,
-        promptSnapshot: prompt,
-        downloadName: buildDownloadName(),
-        previewUrl: `data:${data.mimeType};base64,${data.imageBase64}`,
+      const data = await requestGeneration(accessToken, payload, {
+        onStatus: (eventPayload) => {
+          if (eventPayload?.message) {
+            setBackendBusyLabel(eventPayload.message);
+          }
+        },
+        onText: (eventPayload) => {
+          const previewText = formatStreamPreviewText(
+            eventPayload?.aggregatedText || eventPayload?.text,
+          );
+
+          if (previewText) {
+            setBackendBusyStreamText(previewText);
+          }
+        },
       });
+      const nextResult = buildGeneratedImageRecord(data, {
+        promptSnapshot: prompt,
+      });
+      setGenerationResult(nextResult);
+
+      try {
+        await persistGeneratedRecord(nextResult);
+      } catch (error) {
+        console.warn("Persist generated result failed:", error);
+        setStudioError("图片已生成，但写入本地资源管理器失败");
+      }
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "banana 生图失败");
     } finally {
+      releaseBackendRequest();
       setStudioPending(false);
     }
   }
@@ -1218,6 +1821,16 @@ function App() {
 
     setEnhancePending(true);
     setStudioError("");
+    const releaseBackendRequest = beginBackendRequest(
+      enhancementTargetImageSize
+        ? `正在提升到 ${enhancementTargetImageSize}...`
+        : "正在提升清晰度...",
+      enhancementTargetImageSize === "4K"
+        ? secondsToEstimateMs(24)
+        : enhancementTargetImageSize === "2K"
+          ? secondsToEstimateMs(18)
+          : secondsToEstimateMs(12),
+    );
 
     try {
       const payload = {
@@ -1235,27 +1848,54 @@ function App() {
           layoutColumns: generationResult.layoutColumns || layoutColumns,
         },
       };
-      const data = await requestEnhancement(accessToken, payload);
+      const data = await requestEnhancement(accessToken, payload, {
+        onStatus: (eventPayload) => {
+          if (eventPayload?.message) {
+            setBackendBusyLabel(eventPayload.message);
+          }
+        },
+        onText: (eventPayload) => {
+          const previewText = formatStreamPreviewText(
+            eventPayload?.aggregatedText || eventPayload?.text,
+          );
 
-      setGenerationResult((currentValue) => ({
-        ...(currentValue || {}),
-        ...data,
-        promptSnapshot: currentValue?.promptSnapshot || prompt,
-        downloadName: buildDownloadName(),
-        previewUrl: `data:${data.mimeType};base64,${data.imageBase64}`,
-      }));
+          if (previewText) {
+            setBackendBusyStreamText(previewText);
+          }
+        },
+      });
+      const nextResult = buildGeneratedImageRecord(
+        {
+          ...(generationResult || {}),
+          ...data,
+        },
+        {
+          promptSnapshot: generationResult?.promptSnapshot || prompt,
+        },
+      );
+
+      setGenerationResult(nextResult);
+
+      try {
+        await persistGeneratedRecord(nextResult);
+      } catch (error) {
+        console.warn("Persist enhanced result failed:", error);
+        setStudioError("图片已生成，但写入本地资源管理器失败");
+      }
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "提升清晰度失败");
     } finally {
+      releaseBackendRequest();
       setEnhancePending(false);
     }
   }
 
-  function openImagePreview() {
-    if (!generationResult?.previewUrl) {
+  function openImagePreview(record = generationResult) {
+    if (!record?.previewUrl) {
       return;
     }
 
+    setImagePreviewRecord(record);
     setImagePreviewTransform({
       scale: MIN_PREVIEW_SCALE,
       x: 0,
@@ -1274,10 +1914,19 @@ function App() {
 
   function closeImagePreview() {
     setImagePreviewOpen(false);
+    setImagePreviewRecord(null);
     setImagePreviewDragging(false);
     imagePreviewPointersRef.current.clear();
     imagePreviewPanRef.current = null;
     imagePreviewPinchRef.current = null;
+  }
+
+  function openResourceManager() {
+    setResourceManagerOpen(true);
+  }
+
+  function handlePreviewStoredRecord(record) {
+    openImagePreview(record);
   }
 
   function getPreviewRelativePoint(clientPoint) {
@@ -1517,6 +2166,7 @@ function App() {
             </div>
           ) : null}
         </main>
+        {backendBusyOverlay}
       </div>
     );
   }
@@ -1584,6 +2234,7 @@ function App() {
             ) : null}
           </section>
         </main>
+        {backendBusyOverlay}
       </div>
     );
   }
@@ -1595,8 +2246,32 @@ function App() {
           <h1>BANANA STUDIO</h1>
         </div>
         <div className="topbar-actions">
-          <button type="button" className="ghost-button" onClick={handleLogout}>
-            退出
+          <button
+            type="button"
+            className="resource-manager-trigger"
+            onClick={openResourceManager}
+            aria-label="打开资源管理器"
+            title="资源管理器"
+          >
+            <span className="sr-only">资源管理器</span>
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect width="8" height="18" x="3" y="3" rx="1" />
+              <path d="M7 3v18" />
+              <path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" />
+            </svg>
+            <span className="resource-manager-trigger-label" aria-hidden="true">
+              库
+            </span>
           </button>
         </div>
       </header>
@@ -1625,14 +2300,14 @@ function App() {
                   >
                     {enhancePending
                       ? `提升到 ${enhancementTargetImageSize} 中...`
-                      : "提升清晰度"}
+                      : `提升清晰度 · 目标 ${enhancementTargetImageSize}`}
                   </button>
                 ) : null}
               </div>
               <button
                 type="button"
                 className="result-image-button"
-                onClick={openImagePreview}
+                onClick={() => openImagePreview(generationResult)}
                 aria-label="打开图片预览"
               >
                 <img
@@ -1741,8 +2416,7 @@ function App() {
                     multiple
                     onChange={handleFileChange}
                   />
-                  <span>点击或拖拽上传参考图片</span>
-                  <small>支持多图上传</small>
+                  <span>上传参考图片（支持多图）</span>
                 </label>
 
                 {referenceImages.length > 0 ? (
@@ -1940,7 +2614,90 @@ function App() {
           </form>
         </section>
       </main>
-      {imagePreviewOpen && generationResult ? (
+      {resourceManagerOpen ? (
+        <div
+          className="resource-manager-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="资源管理器"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setResourceManagerOpen(false);
+            }
+          }}
+        >
+          <section className="resource-manager-panel">
+            <div className="resource-manager-windowbar">
+              <span className="finder-window-spacer" aria-hidden="true" />
+              <strong>资源管理器</strong>
+              <button
+                type="button"
+                className="finder-close-button"
+                onClick={() => setResourceManagerOpen(false)}
+                aria-label="关闭资源管理器"
+                title="关闭"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 5l10 10" />
+                  <path d="M15 5L5 15" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="finder-layout">
+              <aside className="finder-sidebar">
+                <div className="finder-sidebar-group">
+                  <div className="finder-sidebar-list">
+                    {finderFilters.map((item) => (
+                      <FinderSidebarItem
+                        key={item.id}
+                        item={item}
+                        isActive={activeFinderFilter?.id === item.id}
+                        onSelect={setResourceManagerFilter}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+              </aside>
+
+              <section className="finder-browser">
+                <div className="finder-browser-toolbar">
+                  <div className="finder-browser-title">
+                    <strong>{activeFinderFilter?.label || "全部图片"}</strong>
+                    <span>
+                      {filteredGenerationLibrary.length} 个项目
+                    </span>
+                  </div>
+                  <div className="finder-browser-meta">
+                    <span>按保存时间排序</span>
+                    <span>{new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date())}</span>
+                  </div>
+                </div>
+
+                {filteredGenerationLibrary.length > 0 ? (
+                  <div className="finder-grid">
+                    {filteredGenerationLibrary.map((record) => (
+                      <ResourceCard
+                        key={record.id}
+                        record={record}
+                        onPreview={handlePreviewStoredRecord}
+                        onDelete={handleDeleteStoredRecord}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state resource-empty-state">
+                    <p>当前分组里还没有图片。</p>
+                    <small>换一个边栏分组，或者先生成一张图。</small>
+                  </div>
+                )}
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {imagePreviewOpen && previewRecord ? (
         <div
           className="image-preview-overlay"
           role="dialog"
@@ -1960,8 +2717,8 @@ function App() {
             <div className="image-preview-actions">
               <a
                 className="image-preview-action"
-                href={generationResult.previewUrl}
-                download={generationResult.downloadName}
+                href={previewRecord.previewUrl}
+                download={previewRecord.downloadName}
               >
                 下载
               </a>
@@ -1977,6 +2734,17 @@ function App() {
                 }
               >
                 还原
+              </button>
+              <button
+                type="button"
+                className="image-preview-action image-preview-delete"
+                onClick={() => {
+                  if (previewRecord?.id) {
+                    void handleDeleteStoredRecord(previewRecord.id);
+                  }
+                }}
+              >
+                删除
               </button>
               <button
                 type="button"
@@ -2009,7 +2777,7 @@ function App() {
           >
             <img
               className="image-preview-media"
-              src={generationResult.previewUrl}
+              src={previewRecord.previewUrl}
               alt="Banana generated preview"
               draggable="false"
               onLoad={(event) => {
@@ -2056,6 +2824,7 @@ function App() {
           </div>
         </div>
       ) : null}
+      {backendBusyOverlay}
     </div>
   );
 }

@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
 const generationsDir = path.join(rootDir, "storage", "generations");
+const logsDir = path.join(rootDir, "storage", "logs");
 const port = Number(process.env.PORT || 3001);
 const ALL_SUPPORTED_ASPECT_RATIOS = [
   "1:1",
@@ -266,6 +267,91 @@ function buildGenerationId() {
   return `${timestamp}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
+function buildRequestId() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+function getLogDateStamp(date = new Date()) {
+  return [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate()),
+  ].join("-");
+}
+
+function getLogFilePath(date = new Date()) {
+  return path.join(logsDir, `backend-${getLogDateStamp(date)}.log`);
+}
+
+function summarizeForLog(value, seen = new WeakSet()) {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+
+  if (typeof value === "string") {
+    return value.length > 500 ? `${value.slice(0, 497)}...` : value;
+  }
+
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => summarizeForLog(item, seen));
+  }
+
+  if (typeof value === "object") {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+
+    seen.add(value);
+    const entries = Object.entries(value).slice(0, 40).map(([key, entryValue]) => [
+      key,
+      summarizeForLog(entryValue, seen),
+    ]);
+    return Object.fromEntries(entries);
+  }
+
+  return String(value);
+}
+
+async function appendBackendLog(level, message, meta = {}) {
+  const entry = JSON.stringify({
+    ts: new Date().toISOString(),
+    level,
+    message,
+    meta: summarizeForLog(meta),
+  });
+
+  await fs.mkdir(logsDir, { recursive: true });
+  await fs.appendFile(getLogFilePath(), `${entry}\n`, "utf8");
+}
+
+async function logBackend(level, message, meta = {}) {
+  const consoleMethod = level === "error" ? console.error : console.log;
+  consoleMethod(`[backend:${level}] ${message}`, meta);
+
+  try {
+    await appendBackendLog(level, message, meta);
+  } catch (logError) {
+    console.error("[backend:error] Failed to write log entry", logError);
+  }
+}
+
 function getFileExtensionFromMimeType(mimeType) {
   switch (mimeType) {
     case "image/jpeg":
@@ -286,6 +372,7 @@ async function saveGenerationArtifacts({
   modelOutputText,
   resultImageBase64,
   resultMimeType,
+  requestId,
 }) {
   const generationId = buildGenerationId();
   const generationPath = path.join(generationsDir, generationId);
@@ -308,6 +395,7 @@ async function saveGenerationArtifacts({
       {
         id: generationId,
         createdAt: new Date().toISOString(),
+        requestId: requestId || "",
         bananaModel: {
           id: bananaModel.id,
           name: bananaModel.name,
@@ -413,13 +501,86 @@ function buildGeminiPrompt({
   ].join("\n");
 }
 
+function writeSseEvent(response, eventName, payload) {
+  response.write(`event: ${eventName}\n`);
+  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+async function parseSseResponseStream(stream, onMessage) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventCount = 0;
+
+  function drainBuffer(flush = false) {
+    let normalizedBuffer = buffer.replace(/\r\n/g, "\n");
+
+    while (normalizedBuffer.includes("\n\n")) {
+      const boundaryIndex = normalizedBuffer.indexOf("\n\n");
+      const rawEvent = normalizedBuffer.slice(0, boundaryIndex);
+      normalizedBuffer = normalizedBuffer.slice(boundaryIndex + 2);
+
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length === 0) {
+        continue;
+      }
+
+      const dataText = dataLines.join("\n");
+
+      if (dataText === "[DONE]") {
+        continue;
+      }
+
+      eventCount += 1;
+      onMessage(JSON.parse(dataText));
+    }
+
+    if (flush && normalizedBuffer.trim()) {
+      const dataLines = normalizedBuffer
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length > 0) {
+        const dataText = dataLines.join("\n");
+
+        if (dataText !== "[DONE]") {
+          eventCount += 1;
+          onMessage(JSON.parse(dataText));
+        }
+      }
+
+      normalizedBuffer = "";
+    }
+
+    buffer = normalizedBuffer;
+  }
+
+  for await (const chunk of stream) {
+    buffer += decoder.decode(chunk, { stream: true });
+    drainBuffer();
+  }
+
+  buffer += decoder.decode();
+  drainBuffer(true);
+
+  return eventCount;
+}
+
 async function generateImageWithGemini({
+  requestId,
+  requestType,
   bananaModel,
   prompt,
   referenceImages,
   imageOptions,
   layoutGuideImage,
   additionalInstructions = [],
+  onEvent,
+  signal,
 }) {
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
 
@@ -428,7 +589,7 @@ async function generateImageWithGemini({
   }
 
   const providerModel = bananaModel.providerModel;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${providerModel}:generateContent`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${providerModel}:streamGenerateContent?alt=sse`;
   const geminiPrompt = buildGeminiPrompt({
     bananaModel,
     prompt,
@@ -483,6 +644,24 @@ async function generateImageWithGemini({
     },
   };
 
+  onEvent?.({
+    type: "status",
+    stage: "requesting_google",
+    message: `已发送到 Google · ${providerModel}`,
+  });
+
+  await logBackend("info", "Sending request to Google", {
+    requestId,
+    requestType,
+    providerModel,
+    bananaModelId: bananaModel.id,
+    imageOptions,
+    promptLength: prompt.length,
+    promptPreview: prompt.slice(0, 160),
+    referenceImageCount: referenceImages.length,
+    hasLayoutGuideImage: Boolean(layoutGuideImage),
+  });
+
   const geminiResponse = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -490,34 +669,126 @@ async function generateImageWithGemini({
       "x-goog-api-key": apiKey,
     },
     body: JSON.stringify(requestBody),
+    signal,
   });
 
-  const responseText = await geminiResponse.text();
-  const payload = responseText ? JSON.parse(responseText) : {};
-
   if (!geminiResponse.ok) {
+    const responseText = await geminiResponse.text();
+    const payload = responseText ? JSON.parse(responseText) : {};
     const apiMessage =
       payload?.error?.message || "Gemini 图像生成请求失败";
+    await logBackend("error", "Google request failed", {
+      requestId,
+      requestType,
+      providerModel,
+      status: geminiResponse.status,
+      statusText: geminiResponse.statusText,
+      apiMessage,
+      payload,
+    });
     throw new Error(apiMessage);
   }
 
-  const parts =
-    payload?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || [];
-  const imagePart = parts.find((part) => part?.inlineData?.data);
-  const textParts = parts
-    .filter((part) => typeof part?.text === "string" && part.text.trim())
-    .map((part) => part.text.trim());
+  if (!geminiResponse.body) {
+    await logBackend("error", "Google response body missing", {
+      requestId,
+      requestType,
+      providerModel,
+    });
+    throw new Error("Gemini 流式响应不可用");
+  }
 
-  if (!imagePart?.inlineData?.data) {
+  await logBackend("info", "Google stream opened", {
+    requestId,
+    requestType,
+    providerModel,
+    status: geminiResponse.status,
+  });
+
+  let imagePart = null;
+  const textParts = [];
+  let latestResponseId = "";
+  let latestUsageMetadata = null;
+  let streamEventCount = 0;
+  let textChunkCount = 0;
+  let imageChunkCount = 0;
+  let firstChunkLogged = false;
+
+  streamEventCount = await parseSseResponseStream(geminiResponse.body, (payload) => {
+    if (!firstChunkLogged) {
+      firstChunkLogged = true;
+      void logBackend("info", "Received first Google SSE chunk", {
+        requestId,
+        requestType,
+        providerModel,
+      });
+    }
+
+    latestResponseId =
+      typeof payload?.responseId === "string" ? payload.responseId : latestResponseId;
+    latestUsageMetadata = payload?.usageMetadata || latestUsageMetadata;
+
+    const parts =
+      payload?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || [];
+
+    for (const part of parts) {
+      if (typeof part?.text === "string" && part.text.trim()) {
+        const chunkText = part.text.trim();
+        textParts.push(chunkText);
+        textChunkCount += 1;
+        onEvent?.({
+          type: "text",
+          stage: "streaming_text",
+          text: chunkText,
+          aggregatedText: textParts.join("\n"),
+        });
+      }
+
+      if (part?.inlineData?.data) {
+        imagePart = part.inlineData;
+        imageChunkCount += 1;
+        onEvent?.({
+          type: "status",
+          stage: "image_ready",
+          message: "已收到图像结果，正在整理输出...",
+        });
+      }
+    }
+  });
+
+  if (!imagePart?.data) {
+    await logBackend("error", "Google stream completed without image", {
+      requestId,
+      requestType,
+      providerModel,
+      responseId: latestResponseId,
+      streamEventCount,
+      textChunkCount,
+      usageMetadata: latestUsageMetadata,
+    });
     throw new Error("Gemini 没有返回图片结果，请调整提示词后重试");
   }
+
+  await logBackend("info", "Google stream completed", {
+    requestId,
+    requestType,
+    providerModel,
+    responseId: latestResponseId,
+    streamEventCount,
+    textChunkCount,
+    imageChunkCount,
+    usageMetadata: latestUsageMetadata,
+    mimeType: imagePart.mimeType || "image/png",
+  });
 
   return {
     providerModel,
     geminiPrompt,
-    imageBase64: imagePart.inlineData.data,
-    mimeType: imagePart.inlineData.mimeType || "image/png",
+    imageBase64: imagePart.data,
+    mimeType: imagePart.mimeType || "image/png",
     text: textParts.join("\n"),
+    responseId: latestResponseId,
+    usageMetadata: latestUsageMetadata,
   };
 }
 
@@ -574,11 +845,326 @@ app.get("/api/models", ensureAuthenticated, (_request, response) => {
   });
 });
 
-app.post("/api/generate", ensureAuthenticated, async (request, response) => {
+function prepareSseResponse(response) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+}
+
+app.post("/api/generate/stream", ensureAuthenticated, async (request, response) => {
+  prepareSseResponse(response);
+  const abortController = new AbortController();
+  const requestId = buildRequestId();
+  let closed = false;
+
+  response.on("close", () => {
+    if (response.writableEnded) {
+      return;
+    }
+
+    closed = true;
+    abortController.abort();
+    void logBackend("info", "Client disconnected from generate stream", {
+      requestId,
+      route: "/api/generate/stream",
+    });
+  });
+
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
     if (!prompt) {
+      await logBackend("info", "Rejected generate stream request: empty prompt", {
+        requestId,
+        route: "/api/generate/stream",
+      });
+      writeSseEvent(response, "error", { error: "请输入生成要求" });
+      response.end();
+      return;
+    }
+
+    const bananaModel = resolveBananaModel(request.body?.modelId);
+    const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
+    const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
+    const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+
+    await logBackend("info", "Accepted generate stream request", {
+      requestId,
+      route: "/api/generate/stream",
+      bananaModelId: bananaModel.id,
+      providerModel: bananaModel.providerModel,
+      imageOptions,
+      referenceImageCount: referenceImages.length,
+      hasLayoutGuideImage: Boolean(layoutGuideImage),
+      promptLength: prompt.length,
+    });
+
+    writeSseEvent(response, "status", {
+      stage: "accepted",
+      message: "请求已接收，正在整理提示词...",
+      requestId,
+      bananaModelId: bananaModel.id,
+      imageSize: imageOptions.imageSize,
+    });
+
+    const result = await generateImageWithGemini({
+      requestId,
+      requestType: "generate",
+      bananaModel,
+      prompt,
+      referenceImages,
+      imageOptions,
+      layoutGuideImage,
+      signal: abortController.signal,
+      onEvent(eventPayload) {
+        if (!closed) {
+          writeSseEvent(response, eventPayload.type || "status", eventPayload);
+        }
+      },
+    });
+
+    if (closed) {
+      return;
+    }
+
+    writeSseEvent(response, "status", {
+      stage: "saving",
+      message: "正在保存生成结果...",
+      requestId,
+    });
+
+    const savedRecord = await saveGenerationArtifacts({
+      bananaModel,
+      imageOptions,
+      userPrompt: prompt,
+      geminiPrompt: result.geminiPrompt,
+      modelOutputText: result.text,
+      resultImageBase64: result.imageBase64,
+      resultMimeType: result.mimeType,
+      requestId,
+    });
+
+    await logBackend("info", "Saved generate result", {
+      requestId,
+      route: "/api/generate/stream",
+      savedRecordId: savedRecord.id,
+      imagePath: savedRecord.imagePath,
+      metadataPath: savedRecord.metadataPath,
+      responseId: result.responseId,
+      providerModel: result.providerModel,
+    });
+
+    if (closed) {
+      return;
+    }
+
+    writeSseEvent(response, "result", {
+      ok: true,
+      bananaModelId: bananaModel.id,
+      bananaModelName: bananaModel.name,
+      bananaModelTone: bananaModel.tone,
+      bananaModelPriceLabel: bananaModel.priceLabel,
+      bananaModelPriceNote: bananaModel.priceNote,
+      providerModel: result.providerModel,
+      responseId: result.responseId,
+      aspectRatio: imageOptions.aspectRatio,
+      imageSize: imageOptions.imageSize,
+      layoutRows: imageOptions.layoutRows,
+      layoutColumns: imageOptions.layoutColumns,
+      savedRecord,
+      mimeType: result.mimeType,
+      imageBase64: result.imageBase64,
+      text: result.text,
+    });
+  } catch (error) {
+    await logBackend("error", "Generate stream request failed", {
+      requestId,
+      route: "/api/generate/stream",
+      error,
+    });
+    if (!closed) {
+      const message = error instanceof Error ? error.message : "banana 生图失败";
+      writeSseEvent(response, "error", { error: message });
+    }
+  } finally {
+    if (!closed) {
+      response.end();
+    }
+  }
+});
+
+app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) => {
+  prepareSseResponse(response);
+  const abortController = new AbortController();
+  const requestId = buildRequestId();
+  let closed = false;
+
+  response.on("close", () => {
+    if (response.writableEnded) {
+      return;
+    }
+
+    closed = true;
+    abortController.abort();
+    void logBackend("info", "Client disconnected from enhance stream", {
+      requestId,
+      route: "/api/enhance/stream",
+    });
+  });
+
+  try {
+    const prompt = normalizePrompt(request.body?.prompt);
+
+    if (!prompt) {
+      await logBackend("info", "Rejected enhance stream request: missing prompt", {
+        requestId,
+        route: "/api/enhance/stream",
+      });
+      writeSseEvent(response, "error", { error: "缺少原始提示词，无法提升清晰度" });
+      response.end();
+      return;
+    }
+
+    const bananaModel = resolveBananaModel(request.body?.modelId);
+    const sourceImage = sanitizeSourceImage(request.body?.sourceImage);
+
+    if (!sourceImage) {
+      await logBackend("info", "Rejected enhance stream request: missing source image", {
+        requestId,
+        route: "/api/enhance/stream",
+      });
+      writeSseEvent(response, "error", { error: "缺少原始结果图，无法提升清晰度" });
+      response.end();
+      return;
+    }
+
+    const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
+    const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+
+    await logBackend("info", "Accepted enhance stream request", {
+      requestId,
+      route: "/api/enhance/stream",
+      bananaModelId: bananaModel.id,
+      providerModel: bananaModel.providerModel,
+      imageOptions,
+      hasLayoutGuideImage: Boolean(layoutGuideImage),
+      promptLength: prompt.length,
+      sourceImageMimeType: sourceImage.mimeType,
+      sourceImageName: sourceImage.name,
+    });
+
+    writeSseEvent(response, "status", {
+      stage: "accepted",
+      message: `请求已接收，准备提升到 ${imageOptions.imageSize}...`,
+      requestId,
+      bananaModelId: bananaModel.id,
+      imageSize: imageOptions.imageSize,
+    });
+
+    const result = await generateImageWithGemini({
+      requestId,
+      requestType: "enhance",
+      bananaModel,
+      prompt,
+      referenceImages: [sourceImage],
+      imageOptions,
+      layoutGuideImage,
+      signal: abortController.signal,
+      additionalInstructions: [
+        "The uploaded reference image is the previously generated low-resolution result.",
+        "Preserve the composition, panel layout, subject identity, perspective, scene structure, and text placement as closely as possible.",
+        "Increase visual clarity, local detail, edge fidelity, and legibility only. Do not redesign the image or change the arrangement.",
+      ],
+      onEvent(eventPayload) {
+        if (!closed) {
+          writeSseEvent(response, eventPayload.type || "status", eventPayload);
+        }
+      },
+    });
+
+    if (closed) {
+      return;
+    }
+
+    writeSseEvent(response, "status", {
+      stage: "saving",
+      message: "正在保存提升结果...",
+      requestId,
+    });
+
+    const savedRecord = await saveGenerationArtifacts({
+      bananaModel,
+      imageOptions,
+      userPrompt: prompt,
+      geminiPrompt: result.geminiPrompt,
+      modelOutputText: result.text,
+      resultImageBase64: result.imageBase64,
+      resultMimeType: result.mimeType,
+      requestId,
+    });
+
+    await logBackend("info", "Saved enhance result", {
+      requestId,
+      route: "/api/enhance/stream",
+      savedRecordId: savedRecord.id,
+      imagePath: savedRecord.imagePath,
+      metadataPath: savedRecord.metadataPath,
+      responseId: result.responseId,
+      providerModel: result.providerModel,
+    });
+
+    if (closed) {
+      return;
+    }
+
+    writeSseEvent(response, "result", {
+      ok: true,
+      bananaModelId: bananaModel.id,
+      bananaModelName: bananaModel.name,
+      bananaModelTone: bananaModel.tone,
+      bananaModelPriceLabel: bananaModel.priceLabel,
+      bananaModelPriceNote: bananaModel.priceNote,
+      providerModel: result.providerModel,
+      responseId: result.responseId,
+      aspectRatio: imageOptions.aspectRatio,
+      imageSize: imageOptions.imageSize,
+      layoutRows: imageOptions.layoutRows,
+      layoutColumns: imageOptions.layoutColumns,
+      savedRecord,
+      mimeType: result.mimeType,
+      imageBase64: result.imageBase64,
+      text: result.text,
+    });
+  } catch (error) {
+    await logBackend("error", "Enhance stream request failed", {
+      requestId,
+      route: "/api/enhance/stream",
+      error,
+    });
+    if (!closed) {
+      const message = error instanceof Error ? error.message : "提升清晰度失败";
+      writeSseEvent(response, "error", { error: message });
+    }
+  } finally {
+    if (!closed) {
+      response.end();
+    }
+  }
+});
+
+app.post("/api/generate", ensureAuthenticated, async (request, response) => {
+  const requestId = buildRequestId();
+  try {
+    const prompt = normalizePrompt(request.body?.prompt);
+
+    if (!prompt) {
+      await logBackend("info", "Rejected generate request: empty prompt", {
+        requestId,
+        route: "/api/generate",
+      });
       response.status(400).json({ error: "请输入生成要求" });
       return;
     }
@@ -587,7 +1173,21 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
     const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+
+    await logBackend("info", "Accepted generate request", {
+      requestId,
+      route: "/api/generate",
+      bananaModelId: bananaModel.id,
+      providerModel: bananaModel.providerModel,
+      imageOptions,
+      referenceImageCount: referenceImages.length,
+      hasLayoutGuideImage: Boolean(layoutGuideImage),
+      promptLength: prompt.length,
+    });
+
     const result = await generateImageWithGemini({
+      requestId,
+      requestType: "generate",
       bananaModel,
       prompt,
       referenceImages,
@@ -602,6 +1202,17 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       modelOutputText: result.text,
       resultImageBase64: result.imageBase64,
       resultMimeType: result.mimeType,
+      requestId,
+    });
+
+    await logBackend("info", "Saved generate result", {
+      requestId,
+      route: "/api/generate",
+      savedRecordId: savedRecord.id,
+      imagePath: savedRecord.imagePath,
+      metadataPath: savedRecord.metadataPath,
+      responseId: result.responseId,
+      providerModel: result.providerModel,
     });
 
     response.json({
@@ -623,16 +1234,25 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "banana 生图失败";
-    console.error("Generate request failed:", error);
+    await logBackend("error", "Generate request failed", {
+      requestId,
+      route: "/api/generate",
+      error,
+    });
     response.status(500).json({ error: message });
   }
 });
 
 app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
+  const requestId = buildRequestId();
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
     if (!prompt) {
+      await logBackend("info", "Rejected enhance request: missing prompt", {
+        requestId,
+        route: "/api/enhance",
+      });
       response.status(400).json({ error: "缺少原始提示词，无法提升清晰度" });
       return;
     }
@@ -641,13 +1261,32 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
     const sourceImage = sanitizeSourceImage(request.body?.sourceImage);
 
     if (!sourceImage) {
+      await logBackend("info", "Rejected enhance request: missing source image", {
+        requestId,
+        route: "/api/enhance",
+      });
       response.status(400).json({ error: "缺少原始结果图，无法提升清晰度" });
       return;
     }
 
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+
+    await logBackend("info", "Accepted enhance request", {
+      requestId,
+      route: "/api/enhance",
+      bananaModelId: bananaModel.id,
+      providerModel: bananaModel.providerModel,
+      imageOptions,
+      hasLayoutGuideImage: Boolean(layoutGuideImage),
+      promptLength: prompt.length,
+      sourceImageMimeType: sourceImage.mimeType,
+      sourceImageName: sourceImage.name,
+    });
+
     const result = await generateImageWithGemini({
+      requestId,
+      requestType: "enhance",
       bananaModel,
       prompt,
       referenceImages: [sourceImage],
@@ -667,6 +1306,17 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       modelOutputText: result.text,
       resultImageBase64: result.imageBase64,
       resultMimeType: result.mimeType,
+      requestId,
+    });
+
+    await logBackend("info", "Saved enhance result", {
+      requestId,
+      route: "/api/enhance",
+      savedRecordId: savedRecord.id,
+      imagePath: savedRecord.imagePath,
+      metadataPath: savedRecord.metadataPath,
+      responseId: result.responseId,
+      providerModel: result.providerModel,
     });
 
     response.json({
@@ -688,7 +1338,11 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "提升清晰度失败";
-    console.error("Enhance request failed:", error);
+    await logBackend("error", "Enhance request failed", {
+      requestId,
+      route: "/api/enhance",
+      error,
+    });
     response.status(500).json({ error: message });
   }
 });
@@ -702,5 +1356,7 @@ if (await hasDistIndex()) {
 }
 
 app.listen(port, () => {
-  console.log(`Backend listening on http://127.0.0.1:${port}`);
+  void logBackend("info", "Backend listening", {
+    url: `http://127.0.0.1:${port}`,
+  });
 });
