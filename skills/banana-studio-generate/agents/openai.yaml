@@ -1,0 +1,4 @@
+interface:
+  display_name: "Banana Studio Generate"
+  short_description: "Generate images via Banana Studio backend auth"
+  default_prompt: "Use $banana-studio-generate to create an image through Banana Studio with just a prompt."

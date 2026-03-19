@@ -1,0 +1,13 @@
+services:
+  banana:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: banana-studio
+    ports:
+      - "23001:23001"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+    restart: unless-stopped

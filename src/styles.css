@@ -822,6 +822,14 @@ textarea {
   margin-top: 4px;
 }
 
+.quota-hint {
+  margin: -2px 0 0;
+  text-align: center;
+  color: rgba(117, 98, 70, 0.8);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .result-panel {
   min-height: 100%;
 }
@@ -1563,10 +1571,198 @@ textarea {
   box-shadow: 0 18px 40px rgba(241, 176, 18, 0.22);
 }
 
+.admin-gate-layout {
+  grid-template-columns: 1fr 0.95fr;
+}
+
+.admin-hero h1 {
+  max-width: 8ch;
+}
+
+.admin-inline-link,
+.admin-nav-link {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.admin-inline-link {
+  margin-left: 8px;
+  font-weight: 700;
+}
+
+.admin-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-topbar {
+  padding-block: 18px;
+}
+
+.admin-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.admin-session-meta {
+  min-width: 170px;
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border: 1px solid rgba(79, 54, 7, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 251, 238, 0.72);
+}
+
+.admin-session-meta strong {
+  font-size: 1.05rem;
+}
+
+.admin-session-meta span,
+.admin-session-meta small {
+  color: var(--muted);
+}
+
+.admin-layout {
+  display: grid;
+  gap: 24px;
+}
+
+.admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.admin-metric-card,
+.admin-password-card {
+  border: 1px solid rgba(79, 54, 7, 0.12);
+  background: rgba(255, 252, 243, 0.8);
+  box-shadow: 0 14px 30px rgba(79, 54, 7, 0.06);
+}
+
+.admin-metric-card {
+  border-radius: 22px;
+  padding: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-metric-card span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.admin-metric-card strong {
+  font-size: clamp(1.6rem, 3vw, 2.4rem);
+  line-height: 1;
+}
+
+.admin-create-form,
+.admin-credit-form {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-create-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.admin-create-form input,
+.admin-credit-form input {
+  border: 1px solid rgba(90, 63, 14, 0.16);
+  background: var(--panel-strong);
+  border-radius: 18px;
+  padding: 14px 16px;
+  color: var(--ink);
+  outline: none;
+}
+
+.admin-create-form input:focus,
+.admin-credit-form input:focus {
+  border-color: rgba(212, 131, 0, 0.48);
+  box-shadow: 0 0 0 4px rgba(239, 178, 23, 0.14);
+}
+
+.admin-create-form button,
+.admin-credit-form button {
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 18px;
+  background: linear-gradient(135deg, var(--accent) 0%, #ffcf4c 100%);
+  color: #2a1d09;
+  font-weight: 800;
+  box-shadow: 0 18px 32px rgba(212, 131, 0, 0.18);
+}
+
+.admin-password-list {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-password-card {
+  border-radius: 24px;
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.admin-password-head,
+.admin-password-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.admin-password-head > div:first-child,
+.admin-password-badge {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-password-head strong,
+.admin-password-badge strong {
+  font-size: 1.1rem;
+}
+
+.admin-password-head span,
+.admin-password-stats span,
+.admin-password-badge span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.admin-password-badge {
+  min-width: 96px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: rgba(255, 243, 200, 0.84);
+  text-align: right;
+}
+
+.admin-credit-form {
+  grid-template-columns: 140px auto;
+  justify-content: start;
+}
+
+.admin-empty-state {
+  margin-top: 8px;
+}
+
 @media (max-width: 1100px) {
   .gate-layout,
-  .studio-layout {
+  .studio-layout,
+  .admin-gate-layout {
     grid-template-columns: 1fr;
+  }
+
+  .admin-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .layout-control-grid {
@@ -1628,6 +1824,7 @@ textarea {
   h1 {
     font-size: clamp(2.2rem, 12vw, 3.2rem);
   }
+
   .topbar-actions {
     flex-direction: row;
     align-items: center;
@@ -1711,6 +1908,22 @@ textarea {
   .finder-item-copy span,
   .finder-item-copy small {
     font-size: 0.7rem;
+  }
+
+  .admin-topbar-actions,
+  .admin-password-head,
+  .admin-password-stats {
+    align-items: stretch;
+  }
+
+  .admin-summary-grid,
+  .admin-create-form,
+  .admin-credit-form {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-password-badge {
+    text-align: left;
   }
 
   .request-busy-chip {

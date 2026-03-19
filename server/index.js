@@ -4,6 +4,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import {
+  DEFAULT_PW_CREDITS,
+  addPwCredits,
+  buildPwSummary,
+  consumePwCredits,
+  createPwRecord,
+  ensureSeedPwRecord,
+  findPwRecord,
+  listPwRecords,
+  normalizePwName,
+  refundPwCredits,
+} from "./pwStore.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,7 +23,8 @@ const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
 const generationsDir = path.join(rootDir, "storage", "generations");
 const logsDir = path.join(rootDir, "storage", "logs");
-const port = Number(process.env.PORT || 3001);
+const pwStoreFilePath = path.join(rootDir, "storage", "pw-store.json");
+const port = Number(process.env.PORT || 23001);
 const ALL_SUPPORTED_ASPECT_RATIOS = [
   "1:1",
   "1:4",
@@ -85,12 +98,24 @@ const BANANA_MODELS = [
 ];
 
 function getAccessPassword() {
-  return (process.env.ACCESS_PASSWORD || "banana").trim();
+  return (process.env.ACCESS_PASSWORD || "").trim();
 }
 
-function getAccessTokenTtlMs() {
-  const minutes = Number(process.env.ACCESS_TOKEN_TTL_MINUTES || 720);
+function getAdminTokenTtlMs() {
+  const minutes = Number(process.env.ADMIN_TOKEN_TTL_MINUTES || 720);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1000 : 12 * 60 * 60 * 1000;
+}
+
+function getAdminUsername() {
+  return (process.env.ADMIN_USERNAME || "").trim();
+}
+
+function getAdminPassword() {
+  return (process.env.ADMIN_PASSWORD || "").trim();
+}
+
+function isAdminConfigured() {
+  return Boolean(getAdminUsername() && getAdminPassword());
 }
 
 function getSigningSecret() {
@@ -109,10 +134,7 @@ function signValue(value) {
   return crypto.createHmac("sha256", getSigningSecret()).update(value).digest("base64url");
 }
 
-function createAccessToken() {
-  const payload = {
-    exp: Date.now() + getAccessTokenTtlMs(),
-  };
+function createSignedToken(payload) {
   const encodedPayload = encodeBase64Url(JSON.stringify(payload));
   const signature = signValue(encodedPayload);
 
@@ -122,7 +144,7 @@ function createAccessToken() {
   };
 }
 
-function verifyAccessToken(token) {
+function verifySignedToken(token) {
   if (typeof token !== "string" || !token.includes(".")) {
     return null;
   }
@@ -153,9 +175,27 @@ function verifyAccessToken(token) {
   }
 }
 
-function passwordsMatch(inputPassword) {
-  const provided = Buffer.from(String(inputPassword || ""));
-  const expected = Buffer.from(getAccessPassword());
+function createAdminToken() {
+  return createSignedToken({
+    type: "admin",
+    username: getAdminUsername(),
+    exp: Date.now() + getAdminTokenTtlMs(),
+  });
+}
+
+function verifyAdminToken(token) {
+  const payload = verifySignedToken(token);
+
+  if (!payload || payload.type !== "admin" || typeof payload.username !== "string") {
+    return null;
+  }
+
+  return payload;
+}
+
+function safeEqualStrings(leftValue, rightValue) {
+  const provided = Buffer.from(String(leftValue || ""));
+  const expected = Buffer.from(String(rightValue || ""));
 
   if (provided.length !== expected.length) {
     return false;
@@ -174,17 +214,64 @@ function getAccessTokenFromRequest(request) {
   return authorization.slice("Bearer ".length).trim();
 }
 
-function ensureAuthenticated(request, response, next) {
-  const payload = verifyAccessToken(getAccessTokenFromRequest(request));
+function getPwFromRequest(request) {
+  return normalizePrompt(
+    request.get("x-banana-pw") || request.get("x-banana-password") || "",
+  );
+}
 
-  if (!payload) {
+async function ensureAuthenticated(request, response, next) {
+  const directPw = getPwFromRequest(request);
+
+  if (!directPw) {
     response.status(401).json({
-      error: "提取码会话无效或已过期，请重新输入提取码",
+      error: "缺少 x-banana-pw 请求头，请重新输入提取码",
     });
     return;
   }
 
-  request.accessPayload = payload;
+  let pwName = "";
+
+  try {
+    pwName = normalizePwName(directPw);
+  } catch (error) {
+    response.status(401).json({
+      error: error instanceof Error ? error.message : "提取码格式不正确",
+    });
+    return;
+  }
+
+  const pwRecord = await findPwRecord({
+    filePath: pwStoreFilePath,
+    name: pwName,
+  });
+
+  if (!pwRecord) {
+    response.status(401).json({
+      error: "提取码已失效或不存在，请联系管理员",
+    });
+    return;
+  }
+
+  request.accessPayload = {
+    type: "header-pw",
+    pwName: pwRecord.name,
+  };
+  request.pwRecord = pwRecord;
+  next();
+}
+
+function ensureAdminAuthenticated(request, response, next) {
+  const payload = verifyAdminToken(getAccessTokenFromRequest(request));
+
+  if (!payload) {
+    response.status(401).json({
+      error: "管理员会话无效或已过期，请重新登录",
+    });
+    return;
+  }
+
+  request.adminPayload = payload;
   next();
 }
 
@@ -801,6 +888,25 @@ async function hasDistIndex() {
   }
 }
 
+async function ensureBootstrapPwRecord() {
+  const accessPassword = getAccessPassword();
+
+  if (!accessPassword) {
+    return null;
+  }
+
+  return ensureSeedPwRecord({
+    filePath: pwStoreFilePath,
+    name: accessPassword,
+    initialCredits: DEFAULT_PW_CREDITS,
+  });
+}
+
+function parsePositiveInteger(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsedValue) ? parsedValue : NaN;
+}
+
 const app = express();
 
 app.use(express.json({ limit: "40mb" }));
@@ -809,33 +915,121 @@ app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
 });
 
-app.post("/api/access/verify", (request, response) => {
-  const password = normalizePrompt(request.body?.password);
-
-  if (!password) {
-    response.status(400).json({ error: "请输入提取码" });
-    return;
-  }
-
-  if (!passwordsMatch(password)) {
-    response.status(401).json({ error: "提取码错误" });
-    return;
-  }
-
-  const tokenBundle = createAccessToken();
-
-  response.json({
-    ok: true,
-    accessToken: tokenBundle.token,
-    expiresAt: tokenBundle.expiresAt,
-  });
-});
-
 app.get("/api/access/session", ensureAuthenticated, (request, response) => {
   response.json({
     ok: true,
-    expiresAt: request.accessPayload.exp,
+    pw: buildPwSummary(request.pwRecord),
   });
+});
+
+app.post("/api/admin/login", (request, response) => {
+  if (!isAdminConfigured()) {
+    response.status(503).json({
+      error: "管理员账号未配置，请先设置 ADMIN_USERNAME 和 ADMIN_PASSWORD",
+    });
+    return;
+  }
+
+  const username = normalizePrompt(request.body?.username);
+  const password = normalizePrompt(request.body?.password);
+
+  if (!username || !password) {
+    response.status(400).json({ error: "请输入管理员用户名和密码" });
+    return;
+  }
+
+  if (
+    !safeEqualStrings(username, getAdminUsername()) ||
+    !safeEqualStrings(password, getAdminPassword())
+  ) {
+    response.status(401).json({ error: "管理员用户名或密码错误" });
+    return;
+  }
+
+  const tokenBundle = createAdminToken();
+
+  response.json({
+    ok: true,
+    adminToken: tokenBundle.token,
+    expiresAt: tokenBundle.expiresAt,
+    username: getAdminUsername(),
+  });
+});
+
+app.get("/api/admin/session", ensureAdminAuthenticated, (request, response) => {
+  response.json({
+    ok: true,
+    username: getAdminUsername(),
+    expiresAt: request.adminPayload.exp,
+  });
+});
+
+app.get("/api/admin/pws", ensureAdminAuthenticated, async (_request, response) => {
+  try {
+    await ensureBootstrapPwRecord();
+    const records = await listPwRecords({ filePath: pwStoreFilePath });
+
+    response.json({
+      ok: true,
+      passwords: records.map(buildPwSummary),
+    });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : "加载 pw 列表失败",
+    });
+  }
+});
+
+app.post("/api/admin/pws", ensureAdminAuthenticated, async (request, response) => {
+  try {
+    const name = normalizePrompt(request.body?.name);
+
+    if (!name) {
+      response.status(400).json({ error: "请输入 pw 名称" });
+      return;
+    }
+
+    const createdRecord = await createPwRecord({
+      filePath: pwStoreFilePath,
+      name,
+      initialCredits: DEFAULT_PW_CREDITS,
+    });
+
+    response.status(201).json({
+      ok: true,
+      pw: buildPwSummary(createdRecord),
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error instanceof Error ? error.message : "创建 pw 失败",
+    });
+  }
+});
+
+app.post("/api/admin/pws/:name/credits", ensureAdminAuthenticated, async (request, response) => {
+  try {
+    const amount = parsePositiveInteger(request.body?.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      response.status(400).json({ error: "追加额度必须是大于 0 的整数" });
+      return;
+    }
+
+    const updatedRecord = await addPwCredits({
+      filePath: pwStoreFilePath,
+      name: request.params.name,
+      amount,
+    });
+
+    response.json({
+      ok: true,
+      pw: buildPwSummary(updatedRecord),
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error instanceof Error ? error.message : "追加额度失败",
+    });
+  }
 });
 
 app.get("/api/models", ensureAuthenticated, (_request, response) => {
@@ -854,11 +1048,32 @@ function prepareSseResponse(response) {
   });
 }
 
+async function consumePwQuotaOrThrow(pwName) {
+  return consumePwCredits({
+    filePath: pwStoreFilePath,
+    name: pwName,
+    amount: 1,
+  });
+}
+
+async function refundPwQuotaIfNeeded(pwName, hasConsumedQuota) {
+  if (!hasConsumedQuota) {
+    return null;
+  }
+
+  return refundPwCredits({
+    filePath: pwStoreFilePath,
+    name: pwName,
+    amount: 1,
+  });
+}
+
 app.post("/api/generate/stream", ensureAuthenticated, async (request, response) => {
   prepareSseResponse(response);
   const abortController = new AbortController();
   const requestId = buildRequestId();
   let closed = false;
+  let hasConsumedQuota = false;
 
   response.on("close", () => {
     if (response.writableEnded) {
@@ -890,10 +1105,15 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
     const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+
+    hasConsumedQuota = true;
 
     await logBackend("info", "Accepted generate stream request", {
       requestId,
       route: "/api/generate/stream",
+      pwName: quotaRecord.name,
+      remainingCredits: quotaRecord.remainingCredits,
       bananaModelId: bananaModel.id,
       providerModel: bananaModel.providerModel,
       imageOptions,
@@ -908,6 +1128,7 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       requestId,
       bananaModelId: bananaModel.id,
       imageSize: imageOptions.imageSize,
+      quota: buildPwSummary(quotaRecord),
     });
 
     const result = await generateImageWithGemini({
@@ -978,8 +1199,30 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       mimeType: result.mimeType,
       imageBase64: result.imageBase64,
       text: result.text,
+      quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
+    if (hasConsumedQuota) {
+      try {
+        const refundedQuotaRecord = await refundPwQuotaIfNeeded(
+          request.accessPayload?.pwName,
+          hasConsumedQuota,
+        );
+        hasConsumedQuota = false;
+        await logBackend("info", "Refunded generate stream quota", {
+          requestId,
+          route: "/api/generate/stream",
+          refundedQuotaRecord: refundedQuotaRecord ? buildPwSummary(refundedQuotaRecord) : null,
+        });
+      } catch (refundError) {
+        await logBackend("error", "Failed to refund generate stream quota", {
+          requestId,
+          route: "/api/generate/stream",
+          refundError,
+        });
+      }
+    }
+
     await logBackend("error", "Generate stream request failed", {
       requestId,
       route: "/api/generate/stream",
@@ -1001,6 +1244,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
   const abortController = new AbortController();
   const requestId = buildRequestId();
   let closed = false;
+  let hasConsumedQuota = false;
 
   response.on("close", () => {
     if (response.writableEnded) {
@@ -1043,10 +1287,15 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
 
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+
+    hasConsumedQuota = true;
 
     await logBackend("info", "Accepted enhance stream request", {
       requestId,
       route: "/api/enhance/stream",
+      pwName: quotaRecord.name,
+      remainingCredits: quotaRecord.remainingCredits,
       bananaModelId: bananaModel.id,
       providerModel: bananaModel.providerModel,
       imageOptions,
@@ -1062,6 +1311,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       requestId,
       bananaModelId: bananaModel.id,
       imageSize: imageOptions.imageSize,
+      quota: buildPwSummary(quotaRecord),
     });
 
     const result = await generateImageWithGemini({
@@ -1137,8 +1387,30 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       mimeType: result.mimeType,
       imageBase64: result.imageBase64,
       text: result.text,
+      quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
+    if (hasConsumedQuota) {
+      try {
+        const refundedQuotaRecord = await refundPwQuotaIfNeeded(
+          request.accessPayload?.pwName,
+          hasConsumedQuota,
+        );
+        hasConsumedQuota = false;
+        await logBackend("info", "Refunded enhance stream quota", {
+          requestId,
+          route: "/api/enhance/stream",
+          refundedQuotaRecord: refundedQuotaRecord ? buildPwSummary(refundedQuotaRecord) : null,
+        });
+      } catch (refundError) {
+        await logBackend("error", "Failed to refund enhance stream quota", {
+          requestId,
+          route: "/api/enhance/stream",
+          refundError,
+        });
+      }
+    }
+
     await logBackend("error", "Enhance stream request failed", {
       requestId,
       route: "/api/enhance/stream",
@@ -1157,6 +1429,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
 
 app.post("/api/generate", ensureAuthenticated, async (request, response) => {
   const requestId = buildRequestId();
+  let hasConsumedQuota = false;
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
@@ -1173,10 +1446,15 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
     const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+
+    hasConsumedQuota = true;
 
     await logBackend("info", "Accepted generate request", {
       requestId,
       route: "/api/generate",
+      pwName: quotaRecord.name,
+      remainingCredits: quotaRecord.remainingCredits,
       bananaModelId: bananaModel.id,
       providerModel: bananaModel.providerModel,
       imageOptions,
@@ -1231,8 +1509,22 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       mimeType: result.mimeType,
       imageBase64: result.imageBase64,
       text: result.text,
+      quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
+    if (hasConsumedQuota) {
+      try {
+        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, hasConsumedQuota);
+        hasConsumedQuota = false;
+      } catch (refundError) {
+        await logBackend("error", "Failed to refund generate quota", {
+          requestId,
+          route: "/api/generate",
+          refundError,
+        });
+      }
+    }
+
     const message = error instanceof Error ? error.message : "banana 生图失败";
     await logBackend("error", "Generate request failed", {
       requestId,
@@ -1245,6 +1537,7 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
 
 app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
   const requestId = buildRequestId();
+  let hasConsumedQuota = false;
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
@@ -1271,10 +1564,15 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
 
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+
+    hasConsumedQuota = true;
 
     await logBackend("info", "Accepted enhance request", {
       requestId,
       route: "/api/enhance",
+      pwName: quotaRecord.name,
+      remainingCredits: quotaRecord.remainingCredits,
       bananaModelId: bananaModel.id,
       providerModel: bananaModel.providerModel,
       imageOptions,
@@ -1335,8 +1633,22 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       mimeType: result.mimeType,
       imageBase64: result.imageBase64,
       text: result.text,
+      quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
+    if (hasConsumedQuota) {
+      try {
+        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, hasConsumedQuota);
+        hasConsumedQuota = false;
+      } catch (refundError) {
+        await logBackend("error", "Failed to refund enhance quota", {
+          requestId,
+          route: "/api/enhance",
+          refundError,
+        });
+      }
+    }
+
     const message = error instanceof Error ? error.message : "提升清晰度失败";
     await logBackend("error", "Enhance request failed", {
       requestId,
@@ -1354,6 +1666,8 @@ if (await hasDistIndex()) {
     response.sendFile(path.join(distDir, "index.html"));
   });
 }
+
+await ensureBootstrapPwRecord();
 
 app.listen(port, () => {
   void logBackend("info", "Backend listening", {

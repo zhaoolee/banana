@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
 import localforage from "localforage";
+import AdminApp from "./AdminApp.jsx";
 
-const ACCESS_TOKEN_STORAGE_KEY = "banana.accessToken";
-const ACCESS_EXPIRES_STORAGE_KEY = "banana.accessExpiresAt";
+const LOGIN_PATH = "/login";
+const STUDIO_PATH = "/studio";
 const SELECTED_MODEL_STORAGE_KEY = "banana.selectedModelId";
 const SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
 const SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
@@ -106,6 +107,15 @@ function clampLayoutTrack(value) {
   }
 
   return Math.min(Math.max(parsedValue, 1), MAX_LAYOUT_TRACKS);
+}
+
+function normalizeTextValue(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeRemainingCredits(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : null;
 }
 
 function buildLayoutCells(rows, columns) {
@@ -338,27 +348,6 @@ function writeLocalValue(key, value) {
   window.localStorage.setItem(key, value);
 }
 
-function readSessionValue(key) {
-  if (typeof window === "undefined") {
-    return "";
-  }
-
-  return window.sessionStorage.getItem(key) || "";
-}
-
-function writeSessionValue(key, value) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  if (!value) {
-    window.sessionStorage.removeItem(key);
-    return;
-  }
-
-  window.sessionStorage.setItem(key, value);
-}
-
 function buildDownloadName() {
   const now = new Date();
   const datePart = [
@@ -530,39 +519,35 @@ async function readFileAsReferenceImage(file) {
   };
 }
 
-async function fetchAccessSession(accessToken) {
-  const response = await fetch("/api/access/session", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
+function buildPwHeaders(password) {
+  const normalizedPassword = normalizeTextValue(password);
 
-  return parseJsonResponse(response);
+  if (!normalizedPassword) {
+    return {};
+  }
+
+  return {
+    "X-Banana-Pw": normalizedPassword,
+  };
 }
 
-async function fetchBananaModels(accessToken) {
+async function fetchBananaModels(password) {
   const response = await fetch("/api/models", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
+    headers: buildPwHeaders(password),
   });
 
   return parseJsonResponse(response);
 }
 
 async function verifyPassword(password) {
-  const response = await fetch("/api/access/verify", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ password }),
+  const response = await fetch("/api/access/session", {
+    headers: buildPwHeaders(password),
   });
 
   return parseJsonResponse(response);
 }
 
-async function requestSseJsonStream(accessToken, endpoint, payload, handlers = {}) {
+async function requestSseJsonStream(password, endpoint, payload, handlers = {}) {
   const abortController = new AbortController();
   let timeoutId = 0;
   let hasReceivedEvent = false;
@@ -669,7 +654,7 @@ async function requestSseJsonStream(accessToken, endpoint, payload, handlers = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
+        ...buildPwHeaders(password),
       },
       body: JSON.stringify(payload),
       signal: abortController.signal,
@@ -726,12 +711,12 @@ async function requestSseJsonStream(accessToken, endpoint, payload, handlers = {
   }
 }
 
-async function requestGeneration(accessToken, payload, handlers) {
-  return requestSseJsonStream(accessToken, "/api/generate/stream", payload, handlers);
+async function requestGeneration(password, payload, handlers) {
+  return requestSseJsonStream(password, "/api/generate/stream", payload, handlers);
 }
 
-async function requestEnhancement(accessToken, payload, handlers) {
-  return requestSseJsonStream(accessToken, "/api/enhance/stream", payload, handlers);
+async function requestEnhancement(password, payload, handlers) {
+  return requestSseJsonStream(password, "/api/enhance/stream", payload, handlers);
 }
 
 function ReferenceCard({ image, index, onRemove, isDragging = false }) {
@@ -946,16 +931,13 @@ function FinderSidebarItem({ item, isActive, onSelect }) {
   );
 }
 
-function App() {
-  const [password, setPassword] = useState(() => readSearchParam("pw"));
-  const [accessToken, setAccessToken] = useState(() =>
-    readSessionValue(ACCESS_TOKEN_STORAGE_KEY),
-  );
-  const [accessExpiresAt, setAccessExpiresAt] = useState(() =>
-    readSessionValue(ACCESS_EXPIRES_STORAGE_KEY),
-  );
+function BananaStudioApp({ routeMode = "login" }) {
+  const urlPassword = normalizeTextValue(readSearchParam("pw"));
+  const shouldAutoVerifyStudioPassword = routeMode === "studio" && Boolean(urlPassword);
+  const [password, setPassword] = useState(() => urlPassword);
+  const [activePw, setActivePw] = useState("");
   const [sessionState, setSessionState] = useState(() =>
-    readSessionValue(ACCESS_TOKEN_STORAGE_KEY) ? "checking" : "locked",
+    shouldAutoVerifyStudioPassword ? "checking" : "locked",
   );
   const [models, setModels] = useState([]);
   const [selectedModelId, setSelectedModelId] = useState(() =>
@@ -977,6 +959,7 @@ function App() {
   const [referenceImages, setReferenceImages] = useState([]);
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
+  const [remainingQuota, setRemainingQuota] = useState(null);
   const [studioError, setStudioError] = useState("");
   const [studioPending, setStudioPending] = useState(false);
   const [enhancePending, setEnhancePending] = useState(false);
@@ -1160,52 +1143,78 @@ function App() {
   }, [isBackendBusy]);
 
   useEffect(() => {
-    if (!accessToken) {
-      setSessionState("locked");
+    if (routeMode === "studio") {
+      if (!urlPassword) {
+        setActivePw("");
+        setRemainingQuota(null);
+        setSessionState("locked");
+      }
+
+      return;
+    }
+
+    setActivePw("");
+    setRemainingQuota(null);
+    setSessionState("locked");
+  }, [routeMode, urlPassword]);
+
+  useEffect(() => {
+    if (!shouldAutoVerifyStudioPassword) {
       return;
     }
 
     let cancelled = false;
+    setSessionState("checking");
+    setAuthPending(true);
+    setAuthError("");
 
-    async function restoreSession() {
-      const releaseBackendRequest = beginBackendRequest(
-        "正在恢复访问状态...",
-        secondsToEstimateMs(3),
-      );
+    const releaseBackendRequest = beginBackendRequest(
+      "正在校验提取码...",
+      secondsToEstimateMs(3),
+    );
 
+    async function verifyStudioPassword() {
       try {
-        const data = await fetchAccessSession(accessToken);
+        const data = await verifyPassword(urlPassword);
 
         if (cancelled) {
           return;
         }
 
+        setActivePw(urlPassword);
+        setRemainingQuota(normalizeRemainingCredits(data?.pw?.remainingCredits));
         setSessionState("ready");
-        setAccessExpiresAt(String(data.expiresAt || ""));
+        setAuthError("");
       } catch {
         if (cancelled) {
           return;
         }
 
-        writeSessionValue(ACCESS_TOKEN_STORAGE_KEY, "");
-        writeSessionValue(ACCESS_EXPIRES_STORAGE_KEY, "");
-        setAccessToken("");
-        setAccessExpiresAt("");
+        setActivePw("");
+        setRemainingQuota(null);
         setSessionState("locked");
+
+        if (typeof window !== "undefined") {
+          window.location.replace(LOGIN_PATH);
+        }
       } finally {
-        releaseBackendRequest();
+        if (!cancelled) {
+          releaseBackendRequest();
+          setAuthPending(false);
+        }
       }
     }
 
-    void restoreSession();
+    void verifyStudioPassword();
 
     return () => {
       cancelled = true;
+      releaseBackendRequest();
     };
-  }, [accessToken]);
+  }, [shouldAutoVerifyStudioPassword, urlPassword]);
 
   useEffect(() => {
-    if (sessionState !== "ready" || !accessToken) {
+    if (sessionState !== "ready" || !activePw) {
       return;
     }
 
@@ -1218,7 +1227,7 @@ function App() {
       );
 
       try {
-        const data = await fetchBananaModels(accessToken);
+        const data = await fetchBananaModels(activePw);
 
         if (cancelled) {
           return;
@@ -1254,7 +1263,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, sessionState]);
+  }, [activePw, sessionState]);
 
   const selectedModel = useMemo(() => {
     return models.find((item) => item.id === selectedModelId) || null;
@@ -1525,14 +1534,22 @@ function App() {
     );
 
     try {
-      const data = await verifyPassword(password);
-      writeSessionValue(ACCESS_TOKEN_STORAGE_KEY, data.accessToken || "");
-      writeSessionValue(ACCESS_EXPIRES_STORAGE_KEY, String(data.expiresAt || ""));
-      setAccessToken(data.accessToken || "");
-      setAccessExpiresAt(String(data.expiresAt || ""));
+      const normalizedPassword = normalizeTextValue(password);
+      const data = await verifyPassword(normalizedPassword);
+      setActivePw(normalizedPassword);
+      setRemainingQuota(normalizeRemainingCredits(data?.pw?.remainingCredits));
       setSessionState("ready");
+
+      if (routeMode === "login" && typeof window !== "undefined") {
+        const nextSearch = normalizedPassword
+          ? `?pw=${encodeURIComponent(normalizedPassword)}`
+          : "";
+        window.location.replace(`${STUDIO_PATH}${nextSearch}`);
+        return;
+      }
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "提取码校验失败");
+      setRemainingQuota(null);
       setSessionState("locked");
     } finally {
       releaseBackendRequest();
@@ -1758,7 +1775,7 @@ function App() {
     setStudioError("");
     const releaseBackendRequest = beginBackendRequest(
       "banana 正在生图...",
-      secondsToEstimateMs(26),
+      secondsToEstimateMs(60),
     );
 
     try {
@@ -1779,7 +1796,7 @@ function App() {
         })),
       };
 
-      const data = await requestGeneration(accessToken, payload, {
+      const data = await requestGeneration(activePw, payload, {
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
@@ -1799,6 +1816,7 @@ function App() {
         promptSnapshot: prompt,
       });
       setGenerationResult(nextResult);
+      setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
 
       try {
         await persistGeneratedRecord(nextResult);
@@ -1815,7 +1833,7 @@ function App() {
   }
 
   async function handleEnhanceGeneration() {
-    if (!generationResult || !canEnhanceGeneration || !accessToken) {
+    if (!generationResult || !canEnhanceGeneration || !activePw) {
       return;
     }
 
@@ -1825,11 +1843,7 @@ function App() {
       enhancementTargetImageSize
         ? `正在提升到 ${enhancementTargetImageSize}...`
         : "正在提升清晰度...",
-      enhancementTargetImageSize === "4K"
-        ? secondsToEstimateMs(24)
-        : enhancementTargetImageSize === "2K"
-          ? secondsToEstimateMs(18)
-          : secondsToEstimateMs(12),
+      secondsToEstimateMs(60),
     );
 
     try {
@@ -1848,7 +1862,7 @@ function App() {
           layoutColumns: generationResult.layoutColumns || layoutColumns,
         },
       };
-      const data = await requestEnhancement(accessToken, payload, {
+      const data = await requestEnhancement(activePw, payload, {
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
@@ -1875,6 +1889,7 @@ function App() {
       );
 
       setGenerationResult(nextResult);
+      setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
 
       try {
         await persistGeneratedRecord(nextResult);
@@ -2148,8 +2163,8 @@ function App() {
       <div className="page-shell">
         <main className="status-card">
           <p className="eyebrow">BANANA ACCESS</p>
-          <h1>正在恢复访问状态</h1>
-          <p>如果提取凭证仍有效，会自动进入 banana 工作台。</p>
+          <h1>正在校验提取码</h1>
+          <p>如果当前 pw 仍有效，会自动进入 banana 工作台。</p>
           {generationResult ? (
             <div className="restored-result-card">
               <div className="restored-result-copy">
@@ -2169,6 +2184,10 @@ function App() {
         {backendBusyOverlay}
       </div>
     );
+  }
+
+  if (routeMode === "studio" && sessionState !== "ready" && !shouldAutoVerifyStudioPassword) {
+    return <RouteRedirect to={LOGIN_PATH} />;
   }
 
   if (sessionState !== "ready") {
@@ -2210,28 +2229,6 @@ function App() {
               当前链接参数自动填入值：
               <strong>{readSearchParam("pw") || "未提供"}</strong>
             </p>
-            {generationResult ? (
-              <div className="restored-result-card">
-                <div className="restored-result-copy">
-                  <strong>已恢复上次结果</strong>
-                  <span>
-                    即使误关页面，这张图也会保存在当前浏览器里。
-                  </span>
-                </div>
-                <img
-                  className="restored-result-image"
-                  src={generationResult.previewUrl}
-                  alt="Restored Banana result"
-                />
-                <a
-                  className="download-link restored-result-download"
-                  href={generationResult.previewUrl}
-                  download={generationResult.downloadName}
-                >
-                  下载上次图片
-                </a>
-              </div>
-            ) : null}
           </section>
         </main>
         {backendBusyOverlay}
@@ -2603,13 +2600,18 @@ function App() {
             {studioError ? <p className="error-text">{studioError}</p> : null}
 
             {promptMode !== "focus" ? (
-              <button
-                type="submit"
-                className="primary-button"
-                disabled={studioPending || !selectedModelId}
-              >
-                {studioPending ? "banana 正在生图..." : "开始生成"}
-              </button>
+              <>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={studioPending || !selectedModelId}
+                >
+                  {studioPending ? "banana 正在生图..." : "开始生成"}
+                </button>
+                {remainingQuota !== null ? (
+                  <p className="quota-hint">剩余{remainingQuota}张额度</p>
+                ) : null}
+              </>
             ) : null}
           </form>
         </section>
@@ -2827,6 +2829,57 @@ function App() {
       {backendBusyOverlay}
     </div>
   );
+}
+
+function RouteRedirect({ to }) {
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const targetUrl = `${to}${window.location.search || ""}${window.location.hash || ""}`;
+
+    if (window.location.pathname === to) {
+      return;
+    }
+
+    window.location.replace(targetUrl);
+  }, [to]);
+
+  return (
+    <div className="page-shell">
+      <main className="status-card">
+        <p className="eyebrow">BANANA STUDIO</p>
+        <h1>正在跳转</h1>
+        <p>正在进入 Banana Studio...</p>
+      </main>
+    </div>
+  );
+}
+
+function App() {
+  const pathname =
+    typeof window !== "undefined" && typeof window.location?.pathname === "string"
+      ? window.location.pathname
+      : "/";
+
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return <AdminApp />;
+  }
+
+  if (pathname === "/" || pathname === "") {
+    return <RouteRedirect to={LOGIN_PATH} />;
+  }
+
+  if (pathname === LOGIN_PATH || pathname.startsWith(`${LOGIN_PATH}/`)) {
+    return <BananaStudioApp routeMode="login" />;
+  }
+
+  if (pathname === STUDIO_PATH || pathname.startsWith(`${STUDIO_PATH}/`)) {
+    return <BananaStudioApp routeMode="studio" />;
+  }
+
+  return <RouteRedirect to={LOGIN_PATH} />;
 }
 
 export default App;
