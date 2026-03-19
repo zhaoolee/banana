@@ -10,6 +10,7 @@ const SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
 const SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
 const SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.selectedLayoutColumns";
 const SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.selectedImageSize";
+const SELECTED_IMAGE_COUNT_STORAGE_KEY = "banana.selectedImageCount";
 const PROMPT_STORAGE_KEY = "banana.prompt";
 const LAST_GENERATION_DB_NAME = "banana.studio";
 const LAST_GENERATION_STORE_NAME = "app";
@@ -42,7 +43,18 @@ const IMAGE_SIZE_OPTIONS = [
   { value: "2K", label: "2K" },
   { value: "4K", label: "4K" },
 ];
+const IMAGE_COUNT_OPTIONS = [
+  { value: 1, label: "1 张" },
+  { value: 2, label: "2 张" },
+  { value: 3, label: "3 张" },
+  { value: 4, label: "4 张" },
+];
+const LAYOUT_TRACK_OPTIONS = Array.from({ length: MAX_LAYOUT_TRACKS }, (_value, index) => ({
+  value: index + 1,
+  label: String(index + 1),
+}));
 const SUPPORTED_IMAGE_SIZE_VALUES = new Set(IMAGE_SIZE_OPTIONS.map((option) => option.value));
+const SUPPORTED_IMAGE_COUNT_VALUES = new Set(IMAGE_COUNT_OPTIONS.map((option) => option.value));
 const MIN_PREVIEW_SCALE = 1;
 const MAX_PREVIEW_SCALE = 6;
 const SSE_CONNECT_TIMEOUT_MS = 20 * 1000;
@@ -66,6 +78,43 @@ function normalizeAspectRatioValue(value) {
 
 function normalizeImageSizeValue(value) {
   return SUPPORTED_IMAGE_SIZE_VALUES.has(value) ? value : "1K";
+}
+
+function normalizeImageCountValue(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+  return SUPPORTED_IMAGE_COUNT_VALUES.has(parsedValue) ? parsedValue : 1;
+}
+
+function getAspectRatioOrientation(value) {
+  const { width, height } = parseAspectRatio(value);
+
+  if (width === height) {
+    return "square";
+  }
+
+  return width > height ? "landscape" : "portrait";
+}
+
+function getLayoutOrientation(rows, columns) {
+  if (rows === columns) {
+    return "square";
+  }
+
+  return columns > rows ? "landscape" : "portrait";
+}
+
+function getRecommendedAspectRatiosForLayout(rows, columns) {
+  const layoutOrientation = getLayoutOrientation(rows, columns);
+
+  if (layoutOrientation === "landscape") {
+    return ["4:1", "16:9", "21:9", "4:3"];
+  }
+
+  if (layoutOrientation === "portrait") {
+    return ["1:4", "9:16", "3:4", "4:5"];
+  }
+
+  return ["1:1", "4:5", "5:4"];
 }
 
 function clampPreviewScale(value) {
@@ -349,6 +398,22 @@ function writeLocalValue(key, value) {
 }
 
 function buildDownloadName() {
+  return buildDownloadNameWithOptions();
+}
+
+function getFileExtensionFromMimeType(mimeType) {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/png":
+    default:
+      return "png";
+  }
+}
+
+function buildDownloadNameWithOptions({ mimeType = "image/png", suffix = "" } = {}) {
   const now = new Date();
   const datePart = [
     now.getFullYear(),
@@ -361,7 +426,8 @@ function buildDownloadName() {
     String(now.getSeconds()).padStart(2, "0"),
   ].join("");
 
-  return `banana-${datePart}-${timePart}.png`;
+  const safeSuffix = suffix ? `-${String(suffix).replace(/^-+/, "")}` : "";
+  return `banana-${datePart}-${timePart}${safeSuffix}.${getFileExtensionFromMimeType(mimeType)}`;
 }
 
 function formatPersistedAt(value) {
@@ -779,7 +845,12 @@ function buildPersistedGenerationResultRecord(generationResult) {
     ...persistedRecord,
     id: persistedRecord.id || createPersistedRecordId(),
     persistedAt: persistedRecord.persistedAt || new Date().toISOString(),
-    downloadName: persistedRecord.downloadName || buildDownloadName(),
+    downloadName:
+      persistedRecord.downloadName ||
+      buildDownloadNameWithOptions({
+        mimeType: persistedRecord.mimeType,
+        suffix: persistedRecord.batchSize > 1 ? persistedRecord.batchIndex + 1 : "",
+      }),
   };
 }
 
@@ -793,18 +864,75 @@ function restorePersistedGenerationResultRecord(record) {
     id: record.id || createPersistedRecordId(),
     persistedAt: record.persistedAt || new Date().toISOString(),
     previewUrl: `data:${record.mimeType};base64,${record.imageBase64}`,
-    downloadName: record.downloadName || buildDownloadName(),
+    downloadName:
+      record.downloadName ||
+      buildDownloadNameWithOptions({
+        mimeType: record.mimeType,
+        suffix: record.batchSize > 1 ? record.batchIndex + 1 : "",
+      }),
   };
 }
 
+function getGeneratedResponseImages(data) {
+  if (Array.isArray(data?.images) && data.images.length > 0) {
+    return data.images
+      .filter((image) => image?.imageBase64 && image?.mimeType)
+      .map((image) => ({
+        imageBase64: image.imageBase64,
+        mimeType: image.mimeType,
+      }));
+  }
+
+  if (data?.imageBase64 && data?.mimeType) {
+    return [
+      {
+        imageBase64: data.imageBase64,
+        mimeType: data.mimeType,
+      },
+    ];
+  }
+
+  return [];
+}
+
+function buildGeneratedImageRecords(data, extraFields = {}) {
+  const responseImages = getGeneratedResponseImages(data);
+  const savedRecords = Array.isArray(data?.savedRecords)
+    ? data.savedRecords
+    : data?.savedRecord
+      ? [data.savedRecord]
+      : [];
+  const {
+    images: _images,
+    savedRecords: _savedRecords,
+    imageBase64: _legacyImageBase64,
+    mimeType: _legacyMimeType,
+    savedRecord: _legacySavedRecord,
+    ...sharedFields
+  } = data || {};
+
+  return responseImages
+    .map((image, index) =>
+      restorePersistedGenerationResultRecord({
+        ...sharedFields,
+        ...extraFields,
+        ...image,
+        id: createPersistedRecordId(),
+        persistedAt: new Date().toISOString(),
+        batchIndex: index,
+        batchSize: responseImages.length,
+        savedRecord: savedRecords[index] || null,
+        downloadName: buildDownloadNameWithOptions({
+          mimeType: image.mimeType,
+          suffix: responseImages.length > 1 ? index + 1 : "",
+        }),
+      }),
+    )
+    .filter(Boolean);
+}
+
 function buildGeneratedImageRecord(data, extraFields = {}) {
-  return restorePersistedGenerationResultRecord({
-    ...data,
-    ...extraFields,
-    id: createPersistedRecordId(),
-    persistedAt: new Date().toISOString(),
-    downloadName: buildDownloadName(),
-  });
+  return buildGeneratedImageRecords(data, extraFields)[0] || null;
 }
 
 async function readPersistedGenerationLibrary() {
@@ -955,6 +1083,9 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [selectedImageSize, setSelectedImageSize] = useState(() =>
     normalizeImageSizeValue(readLocalValue(SELECTED_IMAGE_SIZE_STORAGE_KEY) || "1K"),
   );
+  const [selectedImageCount, setSelectedImageCount] = useState(() =>
+    normalizeImageCountValue(readLocalValue(SELECTED_IMAGE_COUNT_STORAGE_KEY) || 1),
+  );
   const [prompt, setPrompt] = useState(() => readLocalValue(PROMPT_STORAGE_KEY));
   const [referenceImages, setReferenceImages] = useState([]);
   const [authError, setAuthError] = useState("");
@@ -970,6 +1101,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [backendBusyTickAt, setBackendBusyTickAt] = useState(0);
   const [backendBusyStreamText, setBackendBusyStreamText] = useState("");
   const [generationResult, setGenerationResult] = useState(null);
+  const [generationResults, setGenerationResults] = useState([]);
   const [generationLibrary, setGenerationLibrary] = useState([]);
   const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
   const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
@@ -1103,6 +1235,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
         setGenerationLibrary(persistedArtifacts.libraryRecords);
         setGenerationResult(persistedArtifacts.currentRecord);
+        setGenerationResults(persistedArtifacts.currentRecord ? [persistedArtifacts.currentRecord] : []);
       } catch (error) {
         console.warn("Restore persisted generation result failed:", error);
       }
@@ -1276,6 +1409,25 @@ function BananaStudioApp({ routeMode = "login" }) {
   const availableImageSizeOptions = useMemo(() => {
     return getModelImageSizeOptions(selectedModel);
   }, [selectedModel]);
+  const layoutOrientation = useMemo(() => {
+    return getLayoutOrientation(layoutRows, layoutColumns);
+  }, [layoutColumns, layoutRows]);
+  const aspectRatioOrientation = useMemo(() => {
+    return getAspectRatioOrientation(selectedAspectRatio);
+  }, [selectedAspectRatio]);
+  const recommendedAspectRatios = useMemo(() => {
+    return getRecommendedAspectRatiosForLayout(layoutRows, layoutColumns).filter((value) =>
+      availableAspectRatioOptions.some((option) => option.value === value),
+    );
+  }, [availableAspectRatioOptions, layoutColumns, layoutRows]);
+  const hasAspectRatioLayoutConflict = useMemo(() => {
+    return (
+      layoutRows * layoutColumns > 1 &&
+      layoutOrientation !== "square" &&
+      aspectRatioOrientation !== "square" &&
+      layoutOrientation !== aspectRatioOrientation
+    );
+  }, [aspectRatioOrientation, layoutColumns, layoutOrientation, layoutRows]);
 
   const generationResultModel = useMemo(() => {
     if (!generationResult?.bananaModelId) {
@@ -1375,6 +1527,15 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setSelectedImageSize(availableImageSizeOptions[0]?.value || "1K");
   }, [availableImageSizeOptions, selectedImageSize]);
+
+  useEffect(() => {
+    if (!SUPPORTED_IMAGE_COUNT_VALUES.has(selectedImageCount)) {
+      setSelectedImageCount(1);
+      return;
+    }
+
+    writeLocalValue(SELECTED_IMAGE_COUNT_STORAGE_KEY, String(selectedImageCount));
+  }, [selectedImageCount]);
 
   useEffect(() => {
     writeLocalValue(PROMPT_STORAGE_KEY, prompt);
@@ -1571,6 +1732,22 @@ function BananaStudioApp({ routeMode = "login" }) {
     });
   }
 
+  function triggerRecordDownload(record) {
+    if (!record?.previewUrl || typeof document === "undefined") {
+      return;
+    }
+
+    const anchor = document.createElement("a");
+    anchor.href = record.previewUrl;
+    anchor.download = record.downloadName || buildDownloadNameWithOptions({
+      mimeType: record.mimeType,
+    });
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
   async function appendReferenceFiles(files) {
     try {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -1710,27 +1887,58 @@ function BananaStudioApp({ routeMode = "login" }) {
     });
   }
 
-  async function persistGeneratedRecord(record) {
-    const nextLibraryRecords = [record, ...generationLibrary];
+  function setCurrentGenerationSelection(records, nextCurrentRecord = records[0] || null) {
+    setGenerationResults(records);
+    setGenerationResult(nextCurrentRecord);
+  }
+
+  async function persistGeneratedRecords(records, currentRecordId = records[0]?.id || "") {
+    const nextLibraryRecords = [...records, ...generationLibrary];
 
     await Promise.all([
       writePersistedGenerationLibrary(nextLibraryRecords),
-      writeLastGenerationRecordId(record.id),
+      writeLastGenerationRecordId(currentRecordId),
     ]);
 
     setGenerationLibrary(nextLibraryRecords);
   }
 
+  async function persistGeneratedRecord(record) {
+    if (!record) {
+      return;
+    }
+
+    await persistGeneratedRecords([record], record.id);
+  }
+
+  function handleSelectGenerationResult(record) {
+    if (!record?.id) {
+      return;
+    }
+
+    setGenerationResult(record);
+    void writeLastGenerationRecordId(record.id);
+  }
+
   async function handleDeleteStoredRecord(recordId) {
     const nextLibraryRecords = generationLibrary.filter((record) => record.id !== recordId);
-    const deletedCurrentResult = generationResult?.id === recordId;
+    const nextBatchResults = generationResults.some((record) => record.id === recordId)
+      ? generationResults.filter((record) => record.id !== recordId)
+      : generationResults;
     const nextStoredCurrentRecord =
       nextLibraryRecords.find((record) => record.id === generationResult?.id) ||
       nextLibraryRecords[0] ||
       null;
-    const nextCurrentRecord = deletedCurrentResult
-      ? nextLibraryRecords[0] || null
-      : generationResult || nextStoredCurrentRecord;
+    const nextCurrentRecord =
+      generationResult?.id === recordId
+        ? nextBatchResults[0] || nextStoredCurrentRecord || null
+        : generationResult || nextBatchResults[0] || nextStoredCurrentRecord;
+    const normalizedNextBatchResults =
+      nextBatchResults.length > 0
+        ? nextBatchResults
+        : nextCurrentRecord
+          ? [nextCurrentRecord]
+          : [];
 
     try {
       await Promise.all([
@@ -1739,7 +1947,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       ]);
 
       setGenerationLibrary(nextLibraryRecords);
-      setGenerationResult(nextCurrentRecord);
+      setCurrentGenerationSelection(normalizedNextBatchResults, nextCurrentRecord);
 
       if (
         imagePreviewOpen &&
@@ -1785,10 +1993,11 @@ function BananaStudioApp({ routeMode = "login" }) {
         imageOptions: {
           aspectRatio: selectedAspectRatio,
           imageSize: selectedImageSize,
+          imageCount: selectedImageCount,
           layoutRows,
           layoutColumns,
         },
-        layoutGuideImage: buildCanvasReferenceImage(layoutCanvasRef.current),
+        layoutGuideImage: hasLayoutValues ? buildCanvasReferenceImage(layoutCanvasRef.current) : null,
         referenceImages: referenceImages.map((image) => ({
           name: image.name,
           mimeType: image.mimeType,
@@ -1812,14 +2021,19 @@ function BananaStudioApp({ routeMode = "login" }) {
           }
         },
       });
-      const nextResult = buildGeneratedImageRecord(data, {
+      const nextResults = buildGeneratedImageRecords(data, {
         promptSnapshot: prompt,
       });
-      setGenerationResult(nextResult);
+
+      if (nextResults.length === 0) {
+        throw new Error("banana 没有返回可用图片");
+      }
+
+      setCurrentGenerationSelection(nextResults, nextResults[0]);
       setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
 
       try {
-        await persistGeneratedRecord(nextResult);
+        await persistGeneratedRecords(nextResults, nextResults[0].id);
       } catch (error) {
         console.warn("Persist generated result failed:", error);
         setStudioError("图片已生成，但写入本地资源管理器失败");
@@ -1878,7 +2092,7 @@ function BananaStudioApp({ routeMode = "login" }) {
           }
         },
       });
-      const nextResult = buildGeneratedImageRecord(
+      const nextResults = buildGeneratedImageRecords(
         {
           ...(generationResult || {}),
           ...data,
@@ -1888,7 +2102,13 @@ function BananaStudioApp({ routeMode = "login" }) {
         },
       );
 
-      setGenerationResult(nextResult);
+      const nextResult = nextResults[0];
+
+      if (!nextResult) {
+        throw new Error("banana 没有返回可用图片");
+      }
+
+      setCurrentGenerationSelection([nextResult], nextResult);
       setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
 
       try {
@@ -1941,6 +2161,8 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function handlePreviewStoredRecord(record) {
+    setCurrentGenerationSelection([record], record);
+    void writeLastGenerationRecordId(record.id);
     openImagePreview(record);
   }
 
@@ -2285,22 +2507,52 @@ function BananaStudioApp({ routeMode = "login" }) {
               <div className="result-toolbar">
                 {generationResult.imageSize ? (
                   <span className="result-chip">
+                    {generationResults.length > 1 ? `已生成 ${generationResults.length} 张独立图片 · ` : ""}
                     {generationResult.imageSize} · {generationResult.aspectRatio}
                   </span>
                 ) : null}
-                {canEnhanceGeneration ? (
-                  <button
-                    type="button"
-                    className="enhance-button"
-                    onClick={handleEnhanceGeneration}
-                    disabled={enhancePending || studioPending}
-                  >
-                    {enhancePending
-                      ? `提升到 ${enhancementTargetImageSize} 中...`
-                      : `提升清晰度 · 目标 ${enhancementTargetImageSize}`}
-                  </button>
-                ) : null}
+                <div className="result-toolbar-actions">
+                  {canEnhanceGeneration ? (
+                    <button
+                      type="button"
+                      className="enhance-button"
+                      onClick={handleEnhanceGeneration}
+                      disabled={enhancePending || studioPending}
+                    >
+                      {enhancePending
+                        ? `提升到 ${enhancementTargetImageSize} 中...`
+                        : `提升清晰度 · 目标 ${enhancementTargetImageSize}`}
+                    </button>
+                  ) : null}
+                </div>
               </div>
+              {generationResults.length > 1 ? (
+                <div className="result-variant-grid">
+                  {generationResults.map((record, index) => {
+                    const isActive = record.id === generationResult.id;
+
+                    return (
+                      <button
+                        key={record.id}
+                        type="button"
+                        className={`result-variant-button${isActive ? " is-active" : ""}`}
+                        onClick={() => handleSelectGenerationResult(record)}
+                        aria-pressed={isActive}
+                      >
+                        <span className="result-variant-media">
+                          <img
+                            className="result-variant-image"
+                            src={record.previewUrl}
+                            alt={`Banana generated variant ${index + 1}`}
+                            draggable="false"
+                          />
+                          <span className="result-variant-label">{index + 1}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="result-image-button"
@@ -2551,37 +2803,56 @@ function BananaStudioApp({ routeMode = "login" }) {
                       </select>
                     </label>
 
-                    <div className="layout-control-grid">
-                      <label className="image-option-field" htmlFor="layoutRows">
-                        <span className="field-label">行数</span>
-                        <input
-                          id="layoutRows"
-                          name="layoutRows"
-                          type="number"
-                          min="1"
-                          max={String(MAX_LAYOUT_TRACKS)}
-                          value={layoutRows}
-                          onChange={(event) =>
-                            setLayoutRows(clampLayoutTrack(event.target.value))
-                          }
-                        />
-                      </label>
+                    <label className="image-option-field image-count-field" htmlFor="imageCountSelector">
+                      <span className="field-label">生成张数</span>
+                      <select
+                        id="imageCountSelector"
+                        name="imageCountSelector"
+                        className="model-selector compact-selector"
+                        value={selectedImageCount}
+                        onChange={(event) => setSelectedImageCount(normalizeImageCountValue(event.target.value))}
+                      >
+                        {IMAGE_COUNT_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
 
-                      <label className="image-option-field" htmlFor="layoutColumns">
-                        <span className="field-label">列数</span>
-                        <input
-                          id="layoutColumns"
-                          name="layoutColumns"
-                          type="number"
-                          min="1"
-                          max={String(MAX_LAYOUT_TRACKS)}
-                          value={layoutColumns}
-                          onChange={(event) =>
-                            setLayoutColumns(clampLayoutTrack(event.target.value))
-                          }
-                        />
-                      </label>
-                    </div>
+                    <label className="image-option-field layout-track-field" htmlFor="layoutRows">
+                      <span className="field-label">行数</span>
+                      <select
+                        id="layoutRows"
+                        name="layoutRows"
+                        className="model-selector compact-selector"
+                        value={layoutRows}
+                        onChange={(event) => setLayoutRows(clampLayoutTrack(event.target.value))}
+                      >
+                        {LAYOUT_TRACK_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="image-option-field layout-track-field" htmlFor="layoutColumns">
+                      <span className="field-label">列数</span>
+                      <select
+                        id="layoutColumns"
+                        name="layoutColumns"
+                        className="model-selector compact-selector"
+                        value={layoutColumns}
+                        onChange={(event) => setLayoutColumns(clampLayoutTrack(event.target.value))}
+                      >
+                        {LAYOUT_TRACK_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
 
                   <div className="layout-preview-shell">

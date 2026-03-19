@@ -45,6 +45,7 @@ const SUPPORTED_ASPECT_RATIOS = new Set(ALL_SUPPORTED_ASPECT_RATIOS);
 const SUPPORTED_IMAGE_SIZES = new Set(["1K", "2K", "4K"]);
 const STANDARD_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
 const MAX_LAYOUT_TRACKS = 8;
+const MAX_IMAGE_COUNT = 4;
 
 const BANANA_MODELS = [
   {
@@ -460,6 +461,8 @@ async function saveGenerationArtifacts({
   resultImageBase64,
   resultMimeType,
   requestId,
+  resultImageIndex = 0,
+  resultImageCount = 1,
 }) {
   const generationId = buildGenerationId();
   const generationPath = path.join(generationsDir, generationId);
@@ -492,6 +495,10 @@ async function saveGenerationArtifacts({
           priceNote: bananaModel.priceNote,
         },
         imageOptions,
+        imagePosition: {
+          index: resultImageIndex,
+          count: resultImageCount,
+        },
         userPrompt,
         geminiPrompt,
         modelOutputText: modelOutputText || "",
@@ -512,6 +519,33 @@ async function saveGenerationArtifacts({
     imagePath,
     metadataPath,
   };
+}
+
+async function saveGenerationArtifactsBatch({
+  bananaModel,
+  imageOptions,
+  userPrompt,
+  geminiPrompt,
+  modelOutputText,
+  resultImages,
+  requestId,
+}) {
+  return Promise.all(
+    resultImages.map((image, index) =>
+      saveGenerationArtifacts({
+        bananaModel,
+        imageOptions,
+        userPrompt,
+        geminiPrompt,
+        modelOutputText,
+        resultImageBase64: image.imageBase64,
+        resultMimeType: image.mimeType,
+        requestId,
+        resultImageIndex: index,
+        resultImageCount: resultImages.length,
+      }),
+    ),
+  );
 }
 
 function sanitizeImageOptions(input, bananaModel) {
@@ -541,12 +575,17 @@ function sanitizeImageOptions(input, bananaModel) {
     typeof input?.imageSize === "string" && allowedImageSizes.includes(input.imageSize)
       ? input.imageSize
       : fallbackImageSize;
+  const imageCount = Math.min(
+    Math.max(Number.parseInt(String(input?.imageCount || "1"), 10) || 1, 1),
+    MAX_IMAGE_COUNT,
+  );
 
   return {
     aspectRatio,
     layoutRows,
     layoutColumns,
     imageSize,
+    imageCount,
   };
 }
 
@@ -570,16 +609,22 @@ function buildGeminiPrompt({
     totalPanels > 1
       ? `Create exactly ${totalPanels} panels arranged in ${imageOptions.layoutRows} horizontal rows and ${imageOptions.layoutColumns} vertical columns. Rows run top-to-bottom. Columns run left-to-right. Do not transpose, rotate, or swap rows and columns.`
       : "Create a single-panel composition.";
+  const imageCountRule =
+    imageOptions.imageCount > 1
+      ? `Return exactly ${imageOptions.imageCount} distinct final images as separate image outputs in a single response. Never merge multiple requested outputs into one contact sheet, one collage, one grid, one tiled image, or one composite canvas unless the user explicitly asks for that. Each returned image must independently satisfy the request.`
+      : "Return exactly 1 final image.";
 
   return [
     "You are Banana Studio, an image generation assistant.",
-    "Return one strong final image that follows the request precisely.",
+    "Return strong final image output that follows the request precisely.",
     bananaModel.promptBooster,
     referenceHint,
     layoutGuideHint,
     `Preferred aspect ratio: ${imageOptions.aspectRatio}.`,
     `Preferred output resolution: ${imageOptions.imageSize}.`,
+    `Requested output count: ${imageOptions.imageCount}.`,
     `Preferred layout grid: ${imageOptions.layoutRows} rows by ${imageOptions.layoutColumns} columns.`,
+    imageCountRule,
     layoutRule,
     "When composing collages, panels, or multi-scene layouts, respect the requested grid structure exactly.",
     "Prefer coherent composition, clear focal subject, refined lighting, and high visual quality.",
@@ -792,10 +837,48 @@ async function generateImageWithGemini({
     status: geminiResponse.status,
   });
 
-  let imagePart = null;
+  const summarizeSafetyRatings = (safetyRatings) =>
+    Array.isArray(safetyRatings)
+      ? safetyRatings.map((rating) => ({
+          category: rating?.category || null,
+          probability: rating?.probability || null,
+          blocked:
+            typeof rating?.blocked === "boolean" ? rating.blocked : null,
+          severity: rating?.severity || null,
+        }))
+      : [];
+
+  const summarizePromptFeedback = (promptFeedback) => {
+    if (!promptFeedback || typeof promptFeedback !== "object") {
+      return null;
+    }
+
+    return {
+      blockReason: promptFeedback?.blockReason || null,
+      blockReasonMessage: promptFeedback?.blockReasonMessage || null,
+      safetyRatings: summarizeSafetyRatings(promptFeedback?.safetyRatings),
+    };
+  };
+
+  const summarizeCandidates = (candidates) =>
+    Array.isArray(candidates)
+      ? candidates.map((candidate, index) => ({
+          index,
+          finishReason: candidate?.finishReason || null,
+          finishMessage: candidate?.finishMessage || null,
+          tokenCount:
+            typeof candidate?.tokenCount === "number" ? candidate.tokenCount : null,
+          safetyRatings: summarizeSafetyRatings(candidate?.safetyRatings),
+        }))
+      : [];
+
+  const imageParts = [];
   const textParts = [];
   let latestResponseId = "";
   let latestUsageMetadata = null;
+  let latestPromptFeedback = null;
+  let latestCandidateDiagnostics = [];
+  let latestModelVersion = "";
   let streamEventCount = 0;
   let textChunkCount = 0;
   let imageChunkCount = 0;
@@ -814,6 +897,16 @@ async function generateImageWithGemini({
     latestResponseId =
       typeof payload?.responseId === "string" ? payload.responseId : latestResponseId;
     latestUsageMetadata = payload?.usageMetadata || latestUsageMetadata;
+    latestPromptFeedback =
+      summarizePromptFeedback(payload?.promptFeedback) || latestPromptFeedback;
+    latestModelVersion =
+      typeof payload?.modelVersion === "string"
+        ? payload.modelVersion
+        : latestModelVersion;
+    const candidateDiagnostics = summarizeCandidates(payload?.candidates);
+    if (candidateDiagnostics.length > 0) {
+      latestCandidateDiagnostics = candidateDiagnostics;
+    }
 
     const parts =
       payload?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || [];
@@ -832,18 +925,24 @@ async function generateImageWithGemini({
       }
 
       if (part?.inlineData?.data) {
-        imagePart = part.inlineData;
+        imageParts.push({
+          data: part.inlineData.data,
+          mimeType: part.inlineData.mimeType || "image/png",
+        });
         imageChunkCount += 1;
         onEvent?.({
           type: "status",
           stage: "image_ready",
-          message: "已收到图像结果，正在整理输出...",
+          message:
+            imageParts.length >= imageOptions.imageCount
+              ? `已收到 ${imageParts.length} 张图片，正在整理输出...`
+              : `已收到第 ${imageParts.length} 张图片，继续等待其余结果...`,
         });
       }
     }
   });
 
-  if (!imagePart?.data) {
+  if (imageParts.length === 0) {
     await logBackend("error", "Google stream completed without image", {
       requestId,
       requestType,
@@ -852,9 +951,19 @@ async function generateImageWithGemini({
       streamEventCount,
       textChunkCount,
       usageMetadata: latestUsageMetadata,
+      promptFeedback: latestPromptFeedback,
+      candidates: latestCandidateDiagnostics,
+      modelVersion: latestModelVersion || null,
     });
     throw new Error("Gemini 没有返回图片结果，请调整提示词后重试");
   }
+
+  const normalizedImages = imageParts
+    .slice(0, imageOptions.imageCount)
+    .map((imagePart) => ({
+      imageBase64: imagePart.data,
+      mimeType: imagePart.mimeType || "image/png",
+    }));
 
   await logBackend("info", "Google stream completed", {
     requestId,
@@ -865,17 +974,179 @@ async function generateImageWithGemini({
     textChunkCount,
     imageChunkCount,
     usageMetadata: latestUsageMetadata,
-    mimeType: imagePart.mimeType || "image/png",
+    promptFeedback: latestPromptFeedback,
+    candidates: latestCandidateDiagnostics,
+    modelVersion: latestModelVersion || null,
+    requestedImageCount: imageOptions.imageCount,
+    returnedImageCount: normalizedImages.length,
+    mimeTypes: normalizedImages.map((image) => image.mimeType),
   });
 
   return {
     providerModel,
     geminiPrompt,
-    imageBase64: imagePart.data,
-    mimeType: imagePart.mimeType || "image/png",
+    images: normalizedImages,
     text: textParts.join("\n"),
     responseId: latestResponseId,
     usageMetadata: latestUsageMetadata,
+  };
+}
+
+function buildSingleImageOptions(imageOptions) {
+  return {
+    ...imageOptions,
+    imageCount: 1,
+  };
+}
+
+async function generateImagesWithGemini({
+  requestId,
+  requestType,
+  bananaModel,
+  prompt,
+  referenceImages,
+  imageOptions,
+  layoutGuideImage,
+  additionalInstructions = [],
+  onEvent,
+  signal,
+}) {
+  const targetImageCount = Math.min(
+    Math.max(Number.parseInt(String(imageOptions?.imageCount || "1"), 10) || 1, 1),
+    MAX_IMAGE_COUNT,
+  );
+
+  if (targetImageCount === 1) {
+    return generateImageWithGemini({
+      requestId,
+      requestType,
+      bananaModel,
+      prompt,
+      referenceImages,
+      imageOptions: buildSingleImageOptions(imageOptions),
+      layoutGuideImage,
+      additionalInstructions,
+      onEvent,
+      signal,
+    });
+  }
+
+  const collectedImages = [];
+  const responseIds = [];
+  const usageMetadataList = [];
+  const textParts = [];
+  let sharedGeminiPrompt = "";
+  let sharedProviderModel = bananaModel.providerModel;
+
+  onEvent?.({
+    type: "status",
+    stage: "requesting_variants",
+    message: `正在并发生成 ${targetImageCount} 张图片...`,
+  });
+
+  onEvent?.({
+    type: "status",
+    stage: "requesting_google_batch",
+    message: `已发送 ${targetImageCount} 路并发请求到 Google...`,
+  });
+
+  let completedCount = 0;
+
+  const variantResults = await Promise.all(
+    Array.from({ length: targetImageCount }, async (_unusedValue, index) => {
+      const result = await generateImageWithGemini({
+        requestId: `${requestId}-${index + 1}`,
+        requestType,
+        bananaModel,
+        prompt,
+        referenceImages,
+        imageOptions: buildSingleImageOptions(imageOptions),
+        layoutGuideImage,
+        additionalInstructions: [
+          ...additionalInstructions,
+          `This request is for output variant ${index + 1} of ${targetImageCount}. Return exactly one standalone image for this variant.`,
+          "Do not combine multiple variants into one image.",
+          "Keep the same user intent, but make this output a distinct variation rather than a near-duplicate.",
+        ],
+        onEvent(eventPayload) {
+          if (!onEvent) {
+            return;
+          }
+
+          if (eventPayload?.type === "status") {
+            return;
+          }
+
+          if (typeof eventPayload?.message === "string") {
+            onEvent({
+              ...eventPayload,
+              message: `[${index + 1}/${targetImageCount}] ${eventPayload.message}`,
+            });
+            return;
+          }
+
+          if (eventPayload?.type === "text" && typeof eventPayload.text === "string") {
+            onEvent({
+              ...eventPayload,
+              text: `[${index + 1}/${targetImageCount}] ${eventPayload.text}`,
+              aggregatedText:
+                typeof eventPayload.aggregatedText === "string"
+                  ? `[${index + 1}/${targetImageCount}] ${eventPayload.aggregatedText}`
+                  : eventPayload.aggregatedText,
+            });
+            return;
+          }
+
+          onEvent(eventPayload);
+        },
+        signal,
+      });
+
+      if (Array.isArray(result.images) && result.images[0]) {
+        completedCount += 1;
+        onEvent?.({
+          type: "status",
+          stage: "variants_progress",
+          message: `已完成 ${completedCount}/${targetImageCount} 张图片...`,
+        });
+      }
+
+      return result;
+    }),
+  );
+
+  for (const result of variantResults) {
+
+    if (!sharedGeminiPrompt) {
+      sharedGeminiPrompt = result.geminiPrompt;
+    }
+
+    sharedProviderModel = result.providerModel || sharedProviderModel;
+
+    if (result.responseId) {
+      responseIds.push(result.responseId);
+    }
+
+    if (result.usageMetadata) {
+      usageMetadataList.push(result.usageMetadata);
+    }
+
+    if (result.text) {
+      textParts.push(result.text);
+    }
+
+    if (Array.isArray(result.images) && result.images[0]) {
+      collectedImages.push(result.images[0]);
+    }
+  }
+
+  return {
+    providerModel: sharedProviderModel,
+    geminiPrompt: sharedGeminiPrompt,
+    images: collectedImages,
+    text: textParts.join("\n\n"),
+    responseId: responseIds.join(","),
+    usageMetadata: usageMetadataList,
   };
 }
 
@@ -1048,23 +1319,23 @@ function prepareSseResponse(response) {
   });
 }
 
-async function consumePwQuotaOrThrow(pwName) {
+async function consumePwQuotaOrThrow(pwName, amount = 1) {
   return consumePwCredits({
     filePath: pwStoreFilePath,
     name: pwName,
-    amount: 1,
+    amount,
   });
 }
 
-async function refundPwQuotaIfNeeded(pwName, hasConsumedQuota) {
-  if (!hasConsumedQuota) {
+async function refundPwQuotaIfNeeded(pwName, amount = 1) {
+  if (!amount || amount <= 0) {
     return null;
   }
 
   return refundPwCredits({
     filePath: pwStoreFilePath,
     name: pwName,
-    amount: 1,
+    amount,
   });
 }
 
@@ -1073,7 +1344,7 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
   const abortController = new AbortController();
   const requestId = buildRequestId();
   let closed = false;
-  let hasConsumedQuota = false;
+  let consumedQuotaAmount = 0;
 
   response.on("close", () => {
     if (response.writableEnded) {
@@ -1105,9 +1376,12 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
     const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
-    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+    let quotaRecord = await consumePwQuotaOrThrow(
+      request.accessPayload.pwName,
+      imageOptions.imageCount,
+    );
 
-    hasConsumedQuota = true;
+    consumedQuotaAmount = imageOptions.imageCount;
 
     await logBackend("info", "Accepted generate stream request", {
       requestId,
@@ -1124,14 +1398,18 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
 
     writeSseEvent(response, "status", {
       stage: "accepted",
-      message: "请求已接收，正在整理提示词...",
+      message:
+        imageOptions.imageCount > 1
+          ? `请求已接收，准备生成 ${imageOptions.imageCount} 张图片...`
+          : "请求已接收，正在整理提示词...",
       requestId,
       bananaModelId: bananaModel.id,
       imageSize: imageOptions.imageSize,
+      imageCount: imageOptions.imageCount,
       quota: buildPwSummary(quotaRecord),
     });
 
-    const result = await generateImageWithGemini({
+    const result = await generateImagesWithGemini({
       requestId,
       requestType: "generate",
       bananaModel,
@@ -1151,31 +1429,51 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       return;
     }
 
+    const missingImageQuota = Math.max(0, consumedQuotaAmount - result.images.length);
+
+    if (missingImageQuota > 0) {
+      quotaRecord =
+        (await refundPwQuotaIfNeeded(request.accessPayload.pwName, missingImageQuota)) ||
+        quotaRecord;
+      consumedQuotaAmount -= missingImageQuota;
+      await logBackend("info", "Refunded unused generate stream quota", {
+        requestId,
+        route: "/api/generate/stream",
+        refundedAmount: missingImageQuota,
+        returnedImageCount: result.images.length,
+        requestedImageCount: imageOptions.imageCount,
+        refundedQuotaRecord: buildPwSummary(quotaRecord),
+      });
+    }
+
     writeSseEvent(response, "status", {
       stage: "saving",
-      message: "正在保存生成结果...",
+      message:
+        result.images.length > 1
+          ? `正在保存 ${result.images.length} 张生成结果...`
+          : "正在保存生成结果...",
       requestId,
     });
 
-    const savedRecord = await saveGenerationArtifacts({
+    const savedRecords = await saveGenerationArtifactsBatch({
       bananaModel,
       imageOptions,
       userPrompt: prompt,
       geminiPrompt: result.geminiPrompt,
       modelOutputText: result.text,
-      resultImageBase64: result.imageBase64,
-      resultMimeType: result.mimeType,
+      resultImages: result.images,
       requestId,
     });
 
     await logBackend("info", "Saved generate result", {
       requestId,
       route: "/api/generate/stream",
-      savedRecordId: savedRecord.id,
-      imagePath: savedRecord.imagePath,
-      metadataPath: savedRecord.metadataPath,
+      savedRecordIds: savedRecords.map((record) => record.id),
+      imagePaths: savedRecords.map((record) => record.imagePath),
+      metadataPaths: savedRecords.map((record) => record.metadataPath),
       responseId: result.responseId,
       providerModel: result.providerModel,
+      returnedImageCount: result.images.length,
     });
 
     if (closed) {
@@ -1195,23 +1493,29 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
       layoutColumns: imageOptions.layoutColumns,
-      savedRecord,
-      mimeType: result.mimeType,
-      imageBase64: result.imageBase64,
+      imageCountRequested: imageOptions.imageCount,
+      imageCountReturned: result.images.length,
+      savedRecord: savedRecords[0] || null,
+      savedRecords,
+      mimeType: result.images[0]?.mimeType || "image/png",
+      imageBase64: result.images[0]?.imageBase64 || "",
+      images: result.images,
       text: result.text,
       quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
-    if (hasConsumedQuota) {
+    if (consumedQuotaAmount > 0) {
+      const refundAmount = consumedQuotaAmount;
       try {
         const refundedQuotaRecord = await refundPwQuotaIfNeeded(
           request.accessPayload?.pwName,
-          hasConsumedQuota,
+          refundAmount,
         );
-        hasConsumedQuota = false;
+        consumedQuotaAmount = 0;
         await logBackend("info", "Refunded generate stream quota", {
           requestId,
           route: "/api/generate/stream",
+          refundedAmount: refundAmount,
           refundedQuotaRecord: refundedQuotaRecord ? buildPwSummary(refundedQuotaRecord) : null,
         });
       } catch (refundError) {
@@ -1244,7 +1548,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
   const abortController = new AbortController();
   const requestId = buildRequestId();
   let closed = false;
-  let hasConsumedQuota = false;
+  let consumedQuotaAmount = 0;
 
   response.on("close", () => {
     if (response.writableEnded) {
@@ -1286,10 +1590,13 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
     }
 
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
-    const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
-    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+    const imageOptions = {
+      ...sanitizeImageOptions(request.body?.imageOptions, bananaModel),
+      imageCount: 1,
+    };
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName, 1);
 
-    hasConsumedQuota = true;
+    consumedQuotaAmount = 1;
 
     await logBackend("info", "Accepted enhance stream request", {
       requestId,
@@ -1314,7 +1621,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       quota: buildPwSummary(quotaRecord),
     });
 
-    const result = await generateImageWithGemini({
+    const result = await generateImagesWithGemini({
       requestId,
       requestType: "enhance",
       bananaModel,
@@ -1351,8 +1658,8 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       userPrompt: prompt,
       geminiPrompt: result.geminiPrompt,
       modelOutputText: result.text,
-      resultImageBase64: result.imageBase64,
-      resultMimeType: result.mimeType,
+      resultImageBase64: result.images[0].imageBase64,
+      resultMimeType: result.images[0].mimeType,
       requestId,
     });
 
@@ -1383,20 +1690,24 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
       layoutColumns: imageOptions.layoutColumns,
+      imageCountRequested: 1,
+      imageCountReturned: 1,
       savedRecord,
-      mimeType: result.mimeType,
-      imageBase64: result.imageBase64,
+      savedRecords: [savedRecord],
+      mimeType: result.images[0].mimeType,
+      imageBase64: result.images[0].imageBase64,
+      images: result.images,
       text: result.text,
       quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
-    if (hasConsumedQuota) {
+    if (consumedQuotaAmount > 0) {
       try {
         const refundedQuotaRecord = await refundPwQuotaIfNeeded(
           request.accessPayload?.pwName,
-          hasConsumedQuota,
+          consumedQuotaAmount,
         );
-        hasConsumedQuota = false;
+        consumedQuotaAmount = 0;
         await logBackend("info", "Refunded enhance stream quota", {
           requestId,
           route: "/api/enhance/stream",
@@ -1429,7 +1740,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
 
 app.post("/api/generate", ensureAuthenticated, async (request, response) => {
   const requestId = buildRequestId();
-  let hasConsumedQuota = false;
+  let consumedQuotaAmount = 0;
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
@@ -1446,9 +1757,12 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
     const referenceImages = sanitizeReferenceImages(request.body?.referenceImages);
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
     const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
-    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+    let quotaRecord = await consumePwQuotaOrThrow(
+      request.accessPayload.pwName,
+      imageOptions.imageCount,
+    );
 
-    hasConsumedQuota = true;
+    consumedQuotaAmount = imageOptions.imageCount;
 
     await logBackend("info", "Accepted generate request", {
       requestId,
@@ -1463,7 +1777,7 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       promptLength: prompt.length,
     });
 
-    const result = await generateImageWithGemini({
+    const result = await generateImagesWithGemini({
       requestId,
       requestType: "generate",
       bananaModel,
@@ -1472,25 +1786,42 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       imageOptions,
       layoutGuideImage,
     });
-    const savedRecord = await saveGenerationArtifacts({
+    const missingImageQuota = Math.max(0, consumedQuotaAmount - result.images.length);
+
+    if (missingImageQuota > 0) {
+      quotaRecord =
+        (await refundPwQuotaIfNeeded(request.accessPayload.pwName, missingImageQuota)) ||
+        quotaRecord;
+      consumedQuotaAmount -= missingImageQuota;
+      await logBackend("info", "Refunded unused generate quota", {
+        requestId,
+        route: "/api/generate",
+        refundedAmount: missingImageQuota,
+        returnedImageCount: result.images.length,
+        requestedImageCount: imageOptions.imageCount,
+        refundedQuotaRecord: buildPwSummary(quotaRecord),
+      });
+    }
+
+    const savedRecords = await saveGenerationArtifactsBatch({
       bananaModel,
       imageOptions,
       userPrompt: prompt,
       geminiPrompt: result.geminiPrompt,
       modelOutputText: result.text,
-      resultImageBase64: result.imageBase64,
-      resultMimeType: result.mimeType,
+      resultImages: result.images,
       requestId,
     });
 
     await logBackend("info", "Saved generate result", {
       requestId,
       route: "/api/generate",
-      savedRecordId: savedRecord.id,
-      imagePath: savedRecord.imagePath,
-      metadataPath: savedRecord.metadataPath,
+      savedRecordIds: savedRecords.map((record) => record.id),
+      imagePaths: savedRecords.map((record) => record.imagePath),
+      metadataPaths: savedRecords.map((record) => record.metadataPath),
       responseId: result.responseId,
       providerModel: result.providerModel,
+      returnedImageCount: result.images.length,
     });
 
     response.json({
@@ -1505,17 +1836,22 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
       layoutColumns: imageOptions.layoutColumns,
-      savedRecord,
-      mimeType: result.mimeType,
-      imageBase64: result.imageBase64,
+      imageCountRequested: imageOptions.imageCount,
+      imageCountReturned: result.images.length,
+      savedRecord: savedRecords[0] || null,
+      savedRecords,
+      mimeType: result.images[0]?.mimeType || "image/png",
+      imageBase64: result.images[0]?.imageBase64 || "",
+      images: result.images,
       text: result.text,
       quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
-    if (hasConsumedQuota) {
+    if (consumedQuotaAmount > 0) {
+      const refundAmount = consumedQuotaAmount;
       try {
-        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, hasConsumedQuota);
-        hasConsumedQuota = false;
+        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, refundAmount);
+        consumedQuotaAmount = 0;
       } catch (refundError) {
         await logBackend("error", "Failed to refund generate quota", {
           requestId,
@@ -1537,7 +1873,7 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
 
 app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
   const requestId = buildRequestId();
-  let hasConsumedQuota = false;
+  let consumedQuotaAmount = 0;
   try {
     const prompt = normalizePrompt(request.body?.prompt);
 
@@ -1563,10 +1899,13 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
     }
 
     const layoutGuideImage = sanitizeLayoutGuideImage(request.body?.layoutGuideImage);
-    const imageOptions = sanitizeImageOptions(request.body?.imageOptions, bananaModel);
-    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName);
+    const imageOptions = {
+      ...sanitizeImageOptions(request.body?.imageOptions, bananaModel),
+      imageCount: 1,
+    };
+    const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName, 1);
 
-    hasConsumedQuota = true;
+    consumedQuotaAmount = 1;
 
     await logBackend("info", "Accepted enhance request", {
       requestId,
@@ -1582,7 +1921,7 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       sourceImageName: sourceImage.name,
     });
 
-    const result = await generateImageWithGemini({
+    const result = await generateImagesWithGemini({
       requestId,
       requestType: "enhance",
       bananaModel,
@@ -1602,8 +1941,8 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       userPrompt: prompt,
       geminiPrompt: result.geminiPrompt,
       modelOutputText: result.text,
-      resultImageBase64: result.imageBase64,
-      resultMimeType: result.mimeType,
+      resultImageBase64: result.images[0].imageBase64,
+      resultMimeType: result.images[0].mimeType,
       requestId,
     });
 
@@ -1629,17 +1968,21 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
       layoutColumns: imageOptions.layoutColumns,
+      imageCountRequested: 1,
+      imageCountReturned: 1,
       savedRecord,
-      mimeType: result.mimeType,
-      imageBase64: result.imageBase64,
+      savedRecords: [savedRecord],
+      mimeType: result.images[0].mimeType,
+      imageBase64: result.images[0].imageBase64,
+      images: result.images,
       text: result.text,
       quota: buildPwSummary(quotaRecord),
     });
   } catch (error) {
-    if (hasConsumedQuota) {
+    if (consumedQuotaAmount > 0) {
       try {
-        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, hasConsumedQuota);
-        hasConsumedQuota = false;
+        await refundPwQuotaIfNeeded(request.accessPayload?.pwName, consumedQuotaAmount);
+        consumedQuotaAmount = 0;
       } catch (refundError) {
         await logBackend("error", "Failed to refund enhance quota", {
           requestId,

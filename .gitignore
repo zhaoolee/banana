@@ -3,3 +3,4 @@ dist
 storage
 .env
 npm-debug.log*
+skills/banana-friends-generate
