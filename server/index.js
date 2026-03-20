@@ -1,9 +1,11 @@
 import "dotenv/config";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { GoogleAuth } from "google-auth-library";
 import {
   DEFAULT_PW_CREDITS,
   addPwCredits,
@@ -46,6 +48,7 @@ const SUPPORTED_IMAGE_SIZES = new Set(["1K", "2K", "4K"]);
 const STANDARD_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
 const MAX_LAYOUT_TRACKS = 8;
 const MAX_IMAGE_COUNT = 4;
+const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 
 const BANANA_MODELS = [
   {
@@ -97,6 +100,9 @@ const BANANA_MODELS = [
     supportsImageSizeParam: true,
   },
 ];
+
+let googleAuthClientPromise = null;
+let googleAdcMetadataPromise = null;
 
 function getAccessPassword() {
   return (process.env.ACCESS_PASSWORD || "").trim();
@@ -335,6 +341,276 @@ function sanitizeLayoutGuideImage(input) {
 
 function resolveBananaModel(modelId) {
   return BANANA_MODELS.find((item) => item.id === modelId) || BANANA_MODELS[0];
+}
+
+function normalizeGoogleAuthMode(value) {
+  const normalizedValue = normalizePrompt(value).toLowerCase();
+
+  if (
+    !normalizedValue ||
+    normalizedValue === "api" ||
+    normalizedValue === "api-key" ||
+    normalizedValue === "apikey"
+  ) {
+    return "api-key";
+  }
+
+  if (
+    normalizedValue === "vertex" ||
+    normalizedValue === "vertex-ai" ||
+    normalizedValue === "vertex-adc" ||
+    normalizedValue === "vertexadc" ||
+    normalizedValue === "adc" ||
+    normalizedValue === "application-default" ||
+    normalizedValue === "application-default-credentials"
+  ) {
+    return "vertex-adc";
+  }
+
+  throw new Error(`不支持的 GEMINI_AUTH_MODE: ${value}`);
+}
+
+function getGoogleGenerationAuthMode() {
+  return normalizeGoogleAuthMode(process.env.GEMINI_AUTH_MODE || process.env.GOOGLE_AUTH_MODE || "");
+}
+
+function getGoogleCloudProject() {
+  return normalizePrompt(
+    process.env.GOOGLE_CLOUD_PROJECT ||
+      process.env.GCLOUD_PROJECT ||
+      process.env.GCP_PROJECT ||
+      "",
+  );
+}
+
+function getGoogleCloudLocation() {
+  return normalizePrompt(process.env.GOOGLE_CLOUD_LOCATION || "global") || "global";
+}
+
+function getGoogleCloudQuotaProject() {
+  return normalizePrompt(
+    process.env.GOOGLE_CLOUD_QUOTA_PROJECT ||
+      process.env.GOOGLE_QUOTA_PROJECT ||
+      getGoogleCloudProject(),
+  );
+}
+
+function getConfiguredGoogleCredentialsPath() {
+  return normalizePrompt(process.env.GOOGLE_APPLICATION_CREDENTIALS || "");
+}
+
+function getDefaultGoogleCloudSdkConfigDir() {
+  const configuredDir = normalizePrompt(process.env.CLOUDSDK_CONFIG || "");
+  return configuredDir || path.join(os.homedir(), ".config", "gcloud");
+}
+
+function getGoogleAdcCandidatePaths() {
+  const configuredPath = getConfiguredGoogleCredentialsPath();
+  const defaultCloudSdkAdcPath = path.join(
+    getDefaultGoogleCloudSdkConfigDir(),
+    "application_default_credentials.json",
+  );
+
+  return [...new Set([
+    configuredPath,
+    "/app/.config/gcloud/application_default_credentials.json",
+    defaultCloudSdkAdcPath,
+  ].filter(Boolean))];
+}
+
+async function getGoogleAdcMetadata() {
+  if (!googleAdcMetadataPromise) {
+    googleAdcMetadataPromise = (async () => {
+      const configuredPath = getConfiguredGoogleCredentialsPath();
+      const candidatePaths = getGoogleAdcCandidatePaths();
+
+      for (const credentialsPath of candidatePaths) {
+        try {
+          const raw = await fs.readFile(credentialsPath, "utf8");
+          const parsed = JSON.parse(raw);
+
+          return {
+            path: credentialsPath,
+            type: normalizePrompt(parsed?.type),
+            quotaProjectId: normalizePrompt(parsed?.quota_project_id),
+            clientEmail: normalizePrompt(parsed?.client_email),
+          };
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            continue;
+          }
+
+          throw error;
+        }
+      }
+
+      return {
+        path: configuredPath || "",
+        type: "",
+        quotaProjectId: "",
+        clientEmail: "",
+      };
+    })().catch((error) => {
+      googleAdcMetadataPromise = null;
+      throw error;
+    });
+  }
+
+  return googleAdcMetadataPromise;
+}
+
+async function resolveGoogleCloudProject() {
+  const configuredProject = getGoogleCloudProject();
+
+  if (configuredProject) {
+    return configuredProject;
+  }
+
+  const adcMetadata = await getGoogleAdcMetadata();
+  return adcMetadata.quotaProjectId || "";
+}
+
+async function resolveGoogleCloudQuotaProject() {
+  const configuredQuotaProject = getGoogleCloudQuotaProject();
+
+  if (configuredQuotaProject) {
+    return configuredQuotaProject;
+  }
+
+  const adcMetadata = await getGoogleAdcMetadata();
+  return adcMetadata.quotaProjectId || (await resolveGoogleCloudProject());
+}
+
+async function getResolvedGoogleBackendSummary() {
+  const authMode = getGoogleGenerationAuthMode();
+
+  if (authMode === "api-key") {
+    return {
+      authMode,
+      backend: "gemini-api",
+      project: null,
+      quotaProject: null,
+      location: null,
+      credentialsPath: null,
+    };
+  }
+
+  const adcMetadata = await getGoogleAdcMetadata();
+  const project = (await resolveGoogleCloudProject()) || null;
+  const quotaProject = (await resolveGoogleCloudQuotaProject()) || null;
+
+  return {
+    authMode,
+    backend: "vertex-ai",
+    project,
+    quotaProject,
+    location: getGoogleCloudLocation(),
+    credentialsPath: adcMetadata.path || getConfiguredGoogleCredentialsPath() || null,
+  };
+}
+
+async function getPublicGoogleBackendSummary() {
+  const summary = await getResolvedGoogleBackendSummary();
+
+  return {
+    authMode: summary.authMode,
+    backend: summary.backend,
+    location: summary.location,
+    projectConfigured: Boolean(summary.project),
+    quotaProjectConfigured: Boolean(summary.quotaProject),
+    credentialsConfigured: Boolean(summary.credentialsPath),
+  };
+}
+
+function getVertexApiHost(location) {
+  return location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
+}
+
+async function getGoogleAuthClient() {
+  if (!googleAuthClientPromise) {
+    const auth = new GoogleAuth({
+      scopes: [GOOGLE_CLOUD_PLATFORM_SCOPE],
+    });
+
+    googleAuthClientPromise = auth.getClient().catch((error) => {
+      googleAuthClientPromise = null;
+      throw error;
+    });
+  }
+
+  return googleAuthClientPromise;
+}
+
+async function buildGoogleRequestConfig(providerModel) {
+  const authMode = getGoogleGenerationAuthMode();
+
+  if (authMode === "api-key") {
+    const apiKey = normalizePrompt(process.env.GEMINI_API_KEY);
+
+    if (!apiKey) {
+      throw new Error("缺少 GEMINI_API_KEY，请先在 .env 中配置，或切换到 GEMINI_AUTH_MODE=vertex-adc");
+    }
+
+    return {
+      authMode,
+      backend: "gemini-api",
+      project: null,
+      location: null,
+      endpoint: `https://generativelanguage.googleapis.com/v1beta/models/${providerModel}:streamGenerateContent?alt=sse`,
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      targetLabel: `Google Gemini API · ${providerModel}`,
+    };
+  }
+
+  const project = await resolveGoogleCloudProject();
+  const location = getGoogleCloudLocation();
+
+  if (!project) {
+    throw new Error("缺少 GOOGLE_CLOUD_PROJECT；如果使用 Docker 挂载 ADC，请确认 application_default_credentials.json 里包含 quota_project_id");
+  }
+
+  const endpoint = `https://${getVertexApiHost(location)}/v1/projects/${project}/locations/${location}/publishers/google/models/${providerModel}:streamGenerateContent?alt=sse`;
+  const authClient = await getGoogleAuthClient();
+  const accessTokenResponse = await authClient.getAccessToken();
+  const accessToken =
+    typeof accessTokenResponse === "string"
+      ? accessTokenResponse
+      : accessTokenResponse?.token || "";
+
+  if (!accessToken) {
+    throw new Error("无法从 ADC 获取 Google 访问令牌，请重新执行 gcloud auth application-default login");
+  }
+
+  const quotaProject = await resolveGoogleCloudQuotaProject();
+
+  return {
+    authMode,
+    backend: "vertex-ai",
+    project,
+    location,
+    endpoint,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      ...(quotaProject ? { "x-goog-user-project": quotaProject } : {}),
+    },
+    targetLabel: `Vertex AI · ${project}/${location} · ${providerModel}`,
+  };
+}
+
+function tryParseJson(text) {
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function padDatePart(value) {
@@ -613,6 +889,10 @@ function buildGeminiPrompt({
     imageOptions.imageCount > 1
       ? `Return exactly ${imageOptions.imageCount} distinct final images as separate image outputs in a single response. Never merge multiple requested outputs into one contact sheet, one collage, one grid, one tiled image, or one composite canvas unless the user explicitly asks for that. Each returned image must independently satisfy the request.`
       : "Return exactly 1 final image.";
+  const layoutCleanRule =
+    totalPanels > 1
+      ? "The final image must not reproduce any guide template, UI mockup, placeholder card, numbered box, row label, column label, beige planning canvas, or thick outer frame. Use the requested grid only as composition structure for the actual artwork."
+      : "Do not add template frames, guide labels, placeholder cards, or planning overlays unless the user explicitly asks for them.";
 
   return [
     "You are Banana Studio, an image generation assistant.",
@@ -626,6 +906,7 @@ function buildGeminiPrompt({
     `Preferred layout grid: ${imageOptions.layoutRows} rows by ${imageOptions.layoutColumns} columns.`,
     imageCountRule,
     layoutRule,
+    layoutCleanRule,
     "When composing collages, panels, or multi-scene layouts, respect the requested grid structure exactly.",
     "Prefer coherent composition, clear focal subject, refined lighting, and high visual quality.",
     ...additionalInstructions,
@@ -714,14 +995,8 @@ async function generateImageWithGemini({
   onEvent,
   signal,
 }) {
-  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
-
-  if (!apiKey) {
-    throw new Error("缺少 GEMINI_API_KEY，请先在 .env 中配置");
-  }
-
   const providerModel = bananaModel.providerModel;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${providerModel}:streamGenerateContent?alt=sse`;
+  const googleRequestConfig = await buildGoogleRequestConfig(providerModel);
   const geminiPrompt = buildGeminiPrompt({
     bananaModel,
     prompt,
@@ -779,13 +1054,17 @@ async function generateImageWithGemini({
   onEvent?.({
     type: "status",
     stage: "requesting_google",
-    message: `已发送到 Google · ${providerModel}`,
+    message: `已发送到 ${googleRequestConfig.targetLabel}`,
   });
 
   await logBackend("info", "Sending request to Google", {
     requestId,
     requestType,
     providerModel,
+    googleAuthMode: googleRequestConfig.authMode,
+    googleBackend: googleRequestConfig.backend,
+    googleCloudProject: googleRequestConfig.project,
+    googleCloudLocation: googleRequestConfig.location,
     bananaModelId: bananaModel.id,
     imageOptions,
     promptLength: prompt.length,
@@ -794,25 +1073,29 @@ async function generateImageWithGemini({
     hasLayoutGuideImage: Boolean(layoutGuideImage),
   });
 
-  const geminiResponse = await fetch(endpoint, {
+  const geminiResponse = await fetch(googleRequestConfig.endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
+    headers: googleRequestConfig.headers,
     body: JSON.stringify(requestBody),
     signal,
   });
 
   if (!geminiResponse.ok) {
     const responseText = await geminiResponse.text();
-    const payload = responseText ? JSON.parse(responseText) : {};
+    const payload = tryParseJson(responseText) || {};
     const apiMessage =
-      payload?.error?.message || "Gemini 图像生成请求失败";
+      payload?.error?.message ||
+      payload?.message ||
+      responseText ||
+      "Gemini 图像生成请求失败";
     await logBackend("error", "Google request failed", {
       requestId,
       requestType,
       providerModel,
+      googleAuthMode: googleRequestConfig.authMode,
+      googleBackend: googleRequestConfig.backend,
+      googleCloudProject: googleRequestConfig.project,
+      googleCloudLocation: googleRequestConfig.location,
       status: geminiResponse.status,
       statusText: geminiResponse.statusText,
       apiMessage,
@@ -826,6 +1109,10 @@ async function generateImageWithGemini({
       requestId,
       requestType,
       providerModel,
+      googleAuthMode: googleRequestConfig.authMode,
+      googleBackend: googleRequestConfig.backend,
+      googleCloudProject: googleRequestConfig.project,
+      googleCloudLocation: googleRequestConfig.location,
     });
     throw new Error("Gemini 流式响应不可用");
   }
@@ -834,6 +1121,10 @@ async function generateImageWithGemini({
     requestId,
     requestType,
     providerModel,
+    googleAuthMode: googleRequestConfig.authMode,
+    googleBackend: googleRequestConfig.backend,
+    googleCloudProject: googleRequestConfig.project,
+    googleCloudLocation: googleRequestConfig.location,
     status: geminiResponse.status,
   });
 
@@ -891,6 +1182,10 @@ async function generateImageWithGemini({
         requestId,
         requestType,
         providerModel,
+        googleAuthMode: googleRequestConfig.authMode,
+        googleBackend: googleRequestConfig.backend,
+        googleCloudProject: googleRequestConfig.project,
+        googleCloudLocation: googleRequestConfig.location,
       });
     }
 
@@ -947,6 +1242,10 @@ async function generateImageWithGemini({
       requestId,
       requestType,
       providerModel,
+      googleAuthMode: googleRequestConfig.authMode,
+      googleBackend: googleRequestConfig.backend,
+      googleCloudProject: googleRequestConfig.project,
+      googleCloudLocation: googleRequestConfig.location,
       responseId: latestResponseId,
       streamEventCount,
       textChunkCount,
@@ -969,6 +1268,10 @@ async function generateImageWithGemini({
     requestId,
     requestType,
     providerModel,
+    googleAuthMode: googleRequestConfig.authMode,
+    googleBackend: googleRequestConfig.backend,
+    googleCloudProject: googleRequestConfig.project,
+    googleCloudLocation: googleRequestConfig.location,
     responseId: latestResponseId,
     streamEventCount,
     textChunkCount,
@@ -984,6 +1287,10 @@ async function generateImageWithGemini({
 
   return {
     providerModel,
+    googleAuthMode: googleRequestConfig.authMode,
+    googleBackend: googleRequestConfig.backend,
+    googleCloudProject: googleRequestConfig.project,
+    googleCloudLocation: googleRequestConfig.location,
     geminiPrompt,
     images: normalizedImages,
     text: textParts.join("\n"),
@@ -1037,6 +1344,10 @@ async function generateImagesWithGemini({
   const textParts = [];
   let sharedGeminiPrompt = "";
   let sharedProviderModel = bananaModel.providerModel;
+  let sharedGoogleAuthMode = "";
+  let sharedGoogleBackend = "";
+  let sharedGoogleCloudProject = null;
+  let sharedGoogleCloudLocation = null;
 
   onEvent?.({
     type: "status",
@@ -1122,6 +1433,10 @@ async function generateImagesWithGemini({
     }
 
     sharedProviderModel = result.providerModel || sharedProviderModel;
+    sharedGoogleAuthMode = result.googleAuthMode || sharedGoogleAuthMode;
+    sharedGoogleBackend = result.googleBackend || sharedGoogleBackend;
+    sharedGoogleCloudProject = result.googleCloudProject || sharedGoogleCloudProject;
+    sharedGoogleCloudLocation = result.googleCloudLocation || sharedGoogleCloudLocation;
 
     if (result.responseId) {
       responseIds.push(result.responseId);
@@ -1142,6 +1457,10 @@ async function generateImagesWithGemini({
 
   return {
     providerModel: sharedProviderModel,
+    googleAuthMode: sharedGoogleAuthMode,
+    googleBackend: sharedGoogleBackend,
+    googleCloudProject: sharedGoogleCloudProject,
+    googleCloudLocation: sharedGoogleCloudLocation,
     geminiPrompt: sharedGeminiPrompt,
     images: collectedImages,
     text: textParts.join("\n\n"),
@@ -1182,8 +1501,11 @@ const app = express();
 
 app.use(express.json({ limit: "40mb" }));
 
-app.get("/api/health", (_request, response) => {
-  response.json({ ok: true });
+app.get("/api/health", async (_request, response) => {
+  response.json({
+    ok: true,
+    google: await getPublicGoogleBackendSummary(),
+  });
 });
 
 app.get("/api/access/session", ensureAuthenticated, (request, response) => {
@@ -1473,6 +1795,10 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       metadataPaths: savedRecords.map((record) => record.metadataPath),
       responseId: result.responseId,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       returnedImageCount: result.images.length,
     });
 
@@ -1488,6 +1814,10 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       bananaModelPriceLabel: bananaModel.priceLabel,
       bananaModelPriceNote: bananaModel.priceNote,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       responseId: result.responseId,
       aspectRatio: imageOptions.aspectRatio,
       imageSize: imageOptions.imageSize,
@@ -1671,6 +2001,10 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       metadataPath: savedRecord.metadataPath,
       responseId: result.responseId,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
     });
 
     if (closed) {
@@ -1685,6 +2019,10 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       bananaModelPriceLabel: bananaModel.priceLabel,
       bananaModelPriceNote: bananaModel.priceNote,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       responseId: result.responseId,
       aspectRatio: imageOptions.aspectRatio,
       imageSize: imageOptions.imageSize,
@@ -1821,6 +2159,10 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       metadataPaths: savedRecords.map((record) => record.metadataPath),
       responseId: result.responseId,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       returnedImageCount: result.images.length,
     });
 
@@ -1832,6 +2174,10 @@ app.post("/api/generate", ensureAuthenticated, async (request, response) => {
       bananaModelPriceLabel: bananaModel.priceLabel,
       bananaModelPriceNote: bananaModel.priceNote,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       aspectRatio: imageOptions.aspectRatio,
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
@@ -1954,6 +2300,10 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       metadataPath: savedRecord.metadataPath,
       responseId: result.responseId,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
     });
 
     response.json({
@@ -1964,6 +2314,10 @@ app.post("/api/enhance", ensureAuthenticated, async (request, response) => {
       bananaModelPriceLabel: bananaModel.priceLabel,
       bananaModelPriceNote: bananaModel.priceNote,
       providerModel: result.providerModel,
+      googleAuthMode: result.googleAuthMode,
+      googleBackend: result.googleBackend,
+      googleCloudProject: result.googleCloudProject,
+      googleCloudLocation: result.googleCloudLocation,
       aspectRatio: imageOptions.aspectRatio,
       imageSize: imageOptions.imageSize,
       layoutRows: imageOptions.layoutRows,
@@ -2011,6 +2365,7 @@ if (await hasDistIndex()) {
 }
 
 await ensureBootstrapPwRecord();
+await logBackend("info", "Google generation backend configured", await getResolvedGoogleBackendSummary());
 
 app.listen(port, () => {
   void logBackend("info", "Backend listening", {

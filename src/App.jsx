@@ -1997,7 +1997,9 @@ function BananaStudioApp({ routeMode = "login" }) {
           layoutRows,
           layoutColumns,
         },
-        layoutGuideImage: hasLayoutValues ? buildCanvasReferenceImage(layoutCanvasRef.current) : null,
+        // Keep the layout guide local-only. Uploading the preview canvas makes Gemini
+        // treat labels, borders, and placeholders as real visual content.
+        layoutGuideImage: null,
         referenceImages: referenceImages.map((image) => ({
           name: image.name,
           mimeType: image.mimeType,
@@ -2075,6 +2077,9 @@ function BananaStudioApp({ routeMode = "login" }) {
           layoutRows: generationResult.layoutRows || layoutRows,
           layoutColumns: generationResult.layoutColumns || layoutColumns,
         },
+        // Preserve panel structure through text instructions instead of sending the
+        // local guide canvas, which can leak guide visuals into the final image.
+        layoutGuideImage: null,
       };
       const data = await requestEnhancement(activePw, payload, {
         onStatus: (eventPayload) => {

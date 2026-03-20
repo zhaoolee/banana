@@ -10,6 +10,7 @@
 
 ```bash
 GEMINI_API_KEY=your-key
+GEMINI_AUTH_MODE=api-key
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-me
 ACCESS_PASSWORD=banana
@@ -17,12 +18,18 @@ ADMIN_TOKEN_TTL_MINUTES=720
 GEMINI_MODEL_NANO_BANANA=gemini-2.5-flash-image
 GEMINI_MODEL_NANO_BANANA_PRO=gemini-3-pro-image-preview
 GEMINI_MODEL_NANO_BANANA_2=gemini-3.1-flash-image-preview
+GOOGLE_CLOUD_PROJECT=
+GOOGLE_CLOUD_LOCATION=global
+GOOGLE_CLOUD_QUOTA_PROJECT=
 PORT=23001
 ```
 
 说明：
 
-- `GEMINI_API_KEY` 由后端读取
+- `GEMINI_AUTH_MODE` 支持 `api-key` 和 `vertex-adc`
+- `api-key` 模式读取 `GEMINI_API_KEY`
+- `vertex-adc` 模式优先读取 `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_QUOTA_PROJECT`
+- 如果 `vertex-adc` 模式没有显式传 `GOOGLE_CLOUD_PROJECT`，后端会尝试从可读取的 `application_default_credentials.json` 的 `quota_project_id` 自动推断
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` 用于登录 `/admin`
 - `ACCESS_PASSWORD` 是可选的初始 `pw` 种子值，服务启动时会自动创建同名 `pw`
 - Studio 与生图接口只使用 `x-banana-pw` 请求头认证
@@ -36,6 +43,12 @@ PORT=23001
 
 ```bash
 docker compose -f docker-compose.dev.yml up --build
+```
+
+如果你想直接挂载本机 `application_default_credentials.json`，用：
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.vertex.dev.yml up --build
 ```
 
 访问：
@@ -52,6 +65,7 @@ docker compose -f docker-compose.dev.yml up --build
 - 源码通过 volume 挂载到容器内，修改本地文件会直接生效
 - `.env` 会挂载进容器
 - 前端通过 `VITE_API_PROXY_TARGET=http://backend:23001` 代理到后端
+- `docker-compose.vertex.dev.yml` 会把宿主机 `${HOME}/.config/gcloud/application_default_credentials.json` 挂到容器内，并自动设置 `GEMINI_AUTH_MODE=vertex-adc`
 
 停止：
 
@@ -71,12 +85,67 @@ http://127.0.0.1:5173/login?pw=banana
 
 - [Dockerfile](/Users/zhaoolee/github/banana/Dockerfile)
 - [docker-compose.yml](/Users/zhaoolee/github/banana/docker-compose.yml)
+- [docker-compose.vertex.yml](/Users/zhaoolee/github/banana/docker-compose.vertex.yml)
 
 启动：
 
 ```bash
 docker compose up -d --build
 ```
+
+如果你想直接用 Docker 挂载 ADC 文件走 Vertex：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d --build
+```
+
+### Vertex 启动方案
+
+适用场景：
+
+- 本地 macOS 已执行 `gcloud auth application-default login`
+- Linux 服务器已经有可用的 ADC 文件
+- 希望直接复用宿主机 `${HOME}/.config/gcloud/application_default_credentials.json`
+
+前提：
+
+```bash
+ls ${HOME}/.config/gcloud/application_default_credentials.json
+```
+
+如果文件存在，就可以直接用 `docker-compose.vertex.yml`。这个 overlay 会自动：
+
+- 挂载 `${HOME}/.config/gcloud/application_default_credentials.json`
+- 设置 `GEMINI_AUTH_MODE=vertex-adc`
+- 设置 `GOOGLE_APPLICATION_CREDENTIALS=/app/.config/gcloud/application_default_credentials.json`
+- 默认使用 `GOOGLE_CLOUD_LOCATION=global`
+
+启动：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vertex.yml up -d --build
+```
+
+查看状态：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.vertex.yml ps
+docker compose -f docker-compose.yml -f docker-compose.vertex.yml logs --tail=50 banana
+curl -sS http://127.0.0.1:23001/api/health
+```
+
+正常情况下，你会在日志或健康检查里看到：
+
+- `authMode: vertex-adc`
+- `backend: vertex-ai`
+- `credentialsConfigured: true`
+
+补充说明：
+
+- 如果 ADC 文件里带有 `quota_project_id`，并且后端能读到该文件，通常可以自动推断 `GOOGLE_CLOUD_PROJECT`
+- 如果你使用的不是 `gcloud auth application-default login` 生成的 ADC，而是其他 JSON 凭据，可能仍需要在 `.env` 里显式设置 `GOOGLE_CLOUD_PROJECT`
+- `docker-compose.vertex.yml` 保留 `${HOME}`，方便本地 macOS 和 Linux 服务器复用同一套启动方式
+- 这套模式只影响“后端到 Google”的认证方式；前端访问你自己的后端仍然使用 `x-banana-pw`
 
 访问：
 
@@ -90,3 +159,5 @@ docker compose up -d --build
 - `./storage:/app/storage` 是持久化卷，保存 `pw-store.json`、日志和生成结果
 - 用户侧接口认证只走 `x-banana-pw`
 - 如果前面挂了 Nginx 或 Caddy，记得保留 `x-banana-pw` 请求头
+- `docker-compose.vertex.yml` 默认挂载宿主机 `${HOME}/.config/gcloud/application_default_credentials.json`
+- 只要你的 ADC 文件里带有 `quota_project_id`，通常不需要再额外传 `GOOGLE_CLOUD_PROJECT`
