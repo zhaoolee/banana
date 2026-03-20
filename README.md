@@ -83,9 +83,9 @@ http://127.0.0.1:5173/login?pw=banana
 
 项目根目录提供：
 
-- [Dockerfile](/Users/zhaoolee/github/banana/Dockerfile)
-- [docker-compose.yml](/Users/zhaoolee/github/banana/docker-compose.yml)
-- [docker-compose.vertex.yml](/Users/zhaoolee/github/banana/docker-compose.vertex.yml)
+- [Dockerfile](./Dockerfile)
+- [docker-compose.yml](./docker-compose.yml)
+- [docker-compose.vertex.yml](./docker-compose.vertex.yml)
 
 启动：
 
