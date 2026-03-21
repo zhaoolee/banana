@@ -492,6 +492,10 @@ textarea:focus {
   gap: 14px;
 }
 
+.prompt-form.is-simple-panel {
+  gap: 16px;
+}
+
 .prompt-panel {
   transition:
     min-height 220ms ease,
@@ -522,6 +526,53 @@ textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.panel-mode-switcher {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid rgba(79, 54, 7, 0.1);
+  border-radius: 18px;
+  background: rgba(255, 250, 235, 0.78);
+}
+
+.panel-mode-button {
+  border: 0;
+  border-radius: 14px;
+  min-height: 42px;
+  padding: 0 14px;
+  font-weight: 800;
+  color: var(--muted);
+  background: transparent;
+  box-shadow: none;
+  transition:
+    transform 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.panel-mode-button:hover {
+  transform: translateY(-1px);
+  color: var(--ink);
+  background: rgba(255, 245, 210, 0.7);
+}
+
+.panel-mode-button:focus-visible {
+  outline: none;
+  color: var(--ink);
+  box-shadow: 0 0 0 4px rgba(239, 178, 23, 0.14);
+}
+
+.panel-mode-button.is-active {
+  color: var(--ink);
+  background:
+    linear-gradient(180deg, rgba(255, 249, 231, 0.98), rgba(255, 234, 173, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 12px 24px rgba(212, 131, 0, 0.12);
 }
 
 .prompt-mode-button {
@@ -909,9 +960,10 @@ textarea {
 }
 
 .result-variant-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -920,6 +972,9 @@ textarea {
 
 .result-variant-button {
   display: block;
+  flex: 0 0 auto;
+  width: clamp(64px, 8vw, 88px);
+  max-width: 88px;
   border: 0;
   border-radius: 0;
   padding: 0;
@@ -1945,6 +2000,10 @@ textarea {
 
   .prompt-form.is-focus-mode {
     grid-template-rows: auto 1fr auto auto;
+  }
+
+  .panel-mode-switcher {
+    grid-template-columns: 1fr;
   }
 
   .reference-grid {

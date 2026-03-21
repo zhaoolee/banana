@@ -5,6 +5,7 @@ import AdminApp from "./AdminApp.jsx";
 
 const LOGIN_PATH = "/login";
 const STUDIO_PATH = "/studio";
+const PANEL_MODE_STORAGE_KEY = "banana.panelMode";
 const SELECTED_MODEL_STORAGE_KEY = "banana.selectedModelId";
 const SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
 const SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
@@ -21,6 +22,16 @@ const MAX_REFERENCE_IMAGES = 12;
 const MAX_LAYOUT_TRACKS = 8;
 const PROMPT_TEXTAREA_MIN_ROWS = 2;
 const PROMPT_TEXTAREA_MAX_ROWS = 5;
+const PANEL_MODE_SIMPLE = "simple";
+const PANEL_MODE_PROFESSIONAL = "professional";
+const SIMPLE_PANEL_DEFAULTS = {
+  modelId: "nano-banana-2",
+  aspectRatio: "3:4",
+  imageSize: "1K",
+  imageCount: 2,
+  layoutRows: 1,
+  layoutColumns: 1,
+};
 const ASPECT_RATIO_OPTIONS = [
   { value: "1:1", label: "方图 1:1" },
   { value: "1:4", label: "超长竖 1:4" },
@@ -74,6 +85,12 @@ function createPersistedRecordId() {
 
 function normalizeAspectRatioValue(value) {
   return SUPPORTED_ASPECT_RATIO_VALUES.has(value) ? value : "1:1";
+}
+
+function normalizePanelModeValue(value) {
+  return value === PANEL_MODE_SIMPLE || value === PANEL_MODE_PROFESSIONAL
+    ? value
+    : PANEL_MODE_PROFESSIONAL;
 }
 
 function normalizeImageSizeValue(value) {
@@ -165,6 +182,22 @@ function normalizeTextValue(value) {
 function normalizeRemainingCredits(value) {
   const parsedValue = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsedValue) && parsedValue >= 0 ? parsedValue : null;
+}
+
+function resolveSimplePanelModelId(models, fallbackModelId) {
+  if (!Array.isArray(models) || models.length === 0) {
+    return fallbackModelId || "";
+  }
+
+  if (models.some((item) => item.id === SIMPLE_PANEL_DEFAULTS.modelId)) {
+    return SIMPLE_PANEL_DEFAULTS.modelId;
+  }
+
+  if (fallbackModelId && models.some((item) => item.id === fallbackModelId)) {
+    return fallbackModelId;
+  }
+
+  return models[0]?.id || "";
 }
 
 function buildLayoutCells(rows, columns) {
@@ -1068,6 +1101,9 @@ function BananaStudioApp({ routeMode = "login" }) {
     shouldAutoVerifyStudioPassword ? "checking" : "locked",
   );
   const [models, setModels] = useState([]);
+  const [panelMode, setPanelMode] = useState(() =>
+    normalizePanelModeValue(readLocalValue(PANEL_MODE_STORAGE_KEY)),
+  );
   const [selectedModelId, setSelectedModelId] = useState(() =>
     readLocalValue(SELECTED_MODEL_STORAGE_KEY),
   );
@@ -1132,6 +1168,8 @@ function BananaStudioApp({ routeMode = "login" }) {
   const imagePreviewPanRef = useRef(null);
   const imagePreviewPinchRef = useRef(null);
   const hasLayoutValues = Boolean(selectedAspectRatio && layoutRows > 0 && layoutColumns > 0);
+  const isSimplePanelMode = panelMode === PANEL_MODE_SIMPLE;
+  const isProfessionalPanelMode = panelMode === PANEL_MODE_PROFESSIONAL;
   const previewRecord = imagePreviewRecord || generationResult;
   const isBackendBusy = backendRequestCount > 0;
   const backendBusyElapsedMs =
@@ -1401,6 +1439,12 @@ function BananaStudioApp({ routeMode = "login" }) {
   const selectedModel = useMemo(() => {
     return models.find((item) => item.id === selectedModelId) || null;
   }, [models, selectedModelId]);
+  const simplePanelModelId = useMemo(() => {
+    return resolveSimplePanelModelId(models, selectedModelId);
+  }, [models, selectedModelId]);
+  const simplePanelModel = useMemo(() => {
+    return models.find((item) => item.id === simplePanelModelId) || null;
+  }, [models, simplePanelModelId]);
 
   const availableAspectRatioOptions = useMemo(() => {
     return getModelAspectRatioOptions(selectedModel);
@@ -1409,6 +1453,36 @@ function BananaStudioApp({ routeMode = "login" }) {
   const availableImageSizeOptions = useMemo(() => {
     return getModelImageSizeOptions(selectedModel);
   }, [selectedModel]);
+  const simplePanelAspectRatio = useMemo(() => {
+    const simpleAspectRatioOptions = getModelAspectRatioOptions(simplePanelModel);
+
+    if (simpleAspectRatioOptions.some((option) => option.value === SIMPLE_PANEL_DEFAULTS.aspectRatio)) {
+      return SIMPLE_PANEL_DEFAULTS.aspectRatio;
+    }
+
+    return simpleAspectRatioOptions[0]?.value || "1:1";
+  }, [simplePanelModel]);
+  const simplePanelImageSize = useMemo(() => {
+    const simpleImageSizeOptions = getModelImageSizeOptions(simplePanelModel);
+
+    if (simpleImageSizeOptions.some((option) => option.value === SIMPLE_PANEL_DEFAULTS.imageSize)) {
+      return SIMPLE_PANEL_DEFAULTS.imageSize;
+    }
+
+    return simpleImageSizeOptions[0]?.value || "1K";
+  }, [simplePanelModel]);
+  const generationModelId = isSimplePanelMode ? simplePanelModelId : selectedModelId;
+  const generationAspectRatio = isSimplePanelMode ? simplePanelAspectRatio : selectedAspectRatio;
+  const generationImageSize = isSimplePanelMode ? simplePanelImageSize : selectedImageSize;
+  const generationImageCount = isSimplePanelMode
+    ? SIMPLE_PANEL_DEFAULTS.imageCount
+    : selectedImageCount;
+  const generationLayoutRows = isSimplePanelMode
+    ? SIMPLE_PANEL_DEFAULTS.layoutRows
+    : layoutRows;
+  const generationLayoutColumns = isSimplePanelMode
+    ? SIMPLE_PANEL_DEFAULTS.layoutColumns
+    : layoutColumns;
   const layoutOrientation = useMemo(() => {
     return getLayoutOrientation(layoutRows, layoutColumns);
   }, [layoutColumns, layoutRows]);
@@ -1481,6 +1555,10 @@ function BananaStudioApp({ routeMode = "login" }) {
       height: `${naturalHeight * safeScale}px`,
     };
   }, [imagePreviewNaturalSize, imagePreviewViewportSize]);
+
+  useEffect(() => {
+    writeLocalValue(PANEL_MODE_STORAGE_KEY, panelMode);
+  }, [panelMode]);
 
   useEffect(() => {
     writeLocalValue(SELECTED_MODEL_STORAGE_KEY, selectedModelId);
@@ -1585,6 +1663,12 @@ function BananaStudioApp({ routeMode = "login" }) {
       textarea.setSelectionRange(textarea.value.length, textarea.value.length);
     });
   }, [promptMode]);
+
+  useEffect(() => {
+    if (panelMode === PANEL_MODE_SIMPLE && promptMode === "focus") {
+      setPromptMode("simple");
+    }
+  }, [panelMode, promptMode]);
 
   useEffect(() => {
     if ((!imagePreviewOpen && !resourceManagerOpen) || typeof window === "undefined" || typeof document === "undefined") {
@@ -1974,7 +2058,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    if (!selectedModelId) {
+    if (!generationModelId) {
       setStudioError("请先选择一个 banana 模型");
       return;
     }
@@ -1988,14 +2072,14 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     try {
       const payload = {
-        modelId: selectedModelId,
+        modelId: generationModelId,
         prompt,
         imageOptions: {
-          aspectRatio: selectedAspectRatio,
-          imageSize: selectedImageSize,
-          imageCount: selectedImageCount,
-          layoutRows,
-          layoutColumns,
+          aspectRatio: generationAspectRatio,
+          imageSize: generationImageSize,
+          imageCount: generationImageCount,
+          layoutRows: generationLayoutRows,
+          layoutColumns: generationLayoutColumns,
         },
         // Keep the layout guide local-only. Uploading the preview canvas makes Gemini
         // treat labels, borders, and placeholders as real visual content.
@@ -2591,47 +2675,69 @@ function BananaStudioApp({ routeMode = "login" }) {
           className={`studio-panel prompt-panel${promptMode === "focus" ? " is-focus-mode" : ""}`}
         >
           <form
-            className={`prompt-form${promptMode === "focus" ? " is-focus-mode" : ""}`}
+            className={`prompt-form${promptMode === "focus" ? " is-focus-mode" : ""}${isSimplePanelMode ? " is-simple-panel" : ""}`}
             onSubmit={handleGenerate}
           >
+            <div className="panel-mode-switcher" role="tablist" aria-label="右侧面板模式">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={isSimplePanelMode}
+                className={`panel-mode-button${isSimplePanelMode ? " is-active" : ""}`}
+                onClick={() => setPanelMode(PANEL_MODE_SIMPLE)}
+              >
+                简易模式
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={isProfessionalPanelMode}
+                className={`panel-mode-button${isProfessionalPanelMode ? " is-active" : ""}`}
+                onClick={() => setPanelMode(PANEL_MODE_PROFESSIONAL)}
+              >
+                专业模式
+              </button>
+            </div>
             <div className="prompt-field-header">
               <label className="field-label" htmlFor="prompt">
                 文本要求
               </label>
-              <button
-                type="button"
-                className={`prompt-mode-button${promptMode === "focus" ? " is-active" : ""}`}
-                onClick={togglePromptMode}
-                aria-label={promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
-                title={promptMode === "focus" ? "退出专注输入" : "进入专注输入"}
-              >
-                <span className="sr-only">
-                  {promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
-                </span>
-                {promptMode === "focus" ? (
-                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                    <path d="M7 3H3v4" />
-                    <path d="M13 3h4v4" />
-                    <path d="M17 13v4h-4" />
-                    <path d="M3 13v4h4" />
-                    <path d="M3 7l5-4" />
-                    <path d="M17 7l-5-4" />
-                    <path d="M17 13l-5 4" />
-                    <path d="M3 13l5 4" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                    <path d="M7 3H3v4" />
-                    <path d="M13 3h4v4" />
-                    <path d="M17 13v4h-4" />
-                    <path d="M3 13v4h4" />
-                    <path d="M3 7l5 5" />
-                    <path d="M17 7l-5 5" />
-                    <path d="M17 13l-5-5" />
-                    <path d="M3 13l5-5" />
-                  </svg>
-                )}
-              </button>
+              {isProfessionalPanelMode ? (
+                <button
+                  type="button"
+                  className={`prompt-mode-button${promptMode === "focus" ? " is-active" : ""}`}
+                  onClick={togglePromptMode}
+                  aria-label={promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
+                  title={promptMode === "focus" ? "退出专注输入" : "进入专注输入"}
+                >
+                  <span className="sr-only">
+                    {promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
+                  </span>
+                  {promptMode === "focus" ? (
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M7 3H3v4" />
+                      <path d="M13 3h4v4" />
+                      <path d="M17 13v4h-4" />
+                      <path d="M3 13v4h4" />
+                      <path d="M3 7l5-4" />
+                      <path d="M17 7l-5-4" />
+                      <path d="M17 13l-5 4" />
+                      <path d="M3 13l5 4" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M7 3H3v4" />
+                      <path d="M13 3h4v4" />
+                      <path d="M17 13v4h-4" />
+                      <path d="M3 13v4h4" />
+                      <path d="M3 7l5 5" />
+                      <path d="M17 7l-5 5" />
+                      <path d="M17 13l-5-5" />
+                      <path d="M3 13l5-5" />
+                    </svg>
+                  )}
+                </button>
+              ) : null}
             </div>
             <textarea
               ref={promptTextareaRef}
@@ -2653,7 +2759,7 @@ function BananaStudioApp({ routeMode = "login" }) {
               <div className="focus-mode-note">按 `Esc` 也可以退出专注输入。</div>
             ) : null}
 
-            {promptMode !== "focus" ? (
+            {promptMode !== "focus" && isProfessionalPanelMode ? (
               <>
                 <label
                   className={`upload-box${uploadDragActive ? " is-drag-active" : ""}`}
@@ -2880,11 +2986,11 @@ function BananaStudioApp({ routeMode = "login" }) {
                 <button
                   type="submit"
                   className="primary-button"
-                  disabled={studioPending || !selectedModelId}
+                  disabled={studioPending || !generationModelId}
                 >
                   {studioPending ? "banana 正在生图..." : "开始生成"}
                 </button>
-                {remainingQuota !== null ? (
+                {isProfessionalPanelMode && remainingQuota !== null ? (
                   <p className="quota-hint">剩余{remainingQuota}张额度</p>
                 ) : null}
               </>
