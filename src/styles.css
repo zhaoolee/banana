@@ -479,10 +479,10 @@ textarea:focus {
 
 .professional-style-reference-card {
   display: grid;
-  grid-template-columns: 124px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  gap: 12px;
   align-items: start;
-  padding: 10px;
+  padding: 8px;
   border: 1px solid rgba(79, 54, 7, 0.1);
   background: rgba(255, 252, 243, 0.84);
 }
@@ -502,36 +502,56 @@ textarea:focus {
 
 .professional-style-reference-copy {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .professional-style-reference-copy strong {
-  font-size: 0.92rem;
-  line-height: 1.4;
+  font-size: 0.88rem;
+  line-height: 1.35;
 }
 
 .professional-style-reference-copy span {
   color: var(--muted);
-  font-size: 0.86rem;
-  line-height: 1.5;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .professional-style-reference-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 2px;
+  align-items: flex-start;
+  gap: 6px;
+  align-content: start;
+  justify-self: end;
 }
 
 .professional-style-reference-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 10px;
   cursor: pointer;
 }
 
 .professional-style-reference-action input {
   display: none;
+}
+
+.professional-style-reference-action svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.professional-style-reference-action-danger {
+  color: rgba(148, 54, 43, 0.92);
 }
 
 .layout-control-row {
@@ -1310,6 +1330,22 @@ textarea:focus {
 
 .storyboard-editor-library-button {
   justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storyboard-editor-library-button.is-pending {
+  pointer-events: none;
+}
+
+.storyboard-editor-library-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(79, 54, 7, 0.16);
+  border-top-color: rgba(79, 54, 7, 0.82);
+  animation: storyboard-editor-library-spin 0.9s linear infinite;
 }
 
 .storyboard-library-picker {
@@ -2734,6 +2770,16 @@ textarea {
   }
 }
 
+@keyframes storyboard-editor-library-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .image-preview-overlay {
   position: fixed;
   inset: 0;
@@ -3306,13 +3352,13 @@ textarea {
   }
 
   .professional-style-reference-actions {
-    display: grid;
-    grid-template-columns: 1fr;
+    display: flex;
+    justify-content: flex-start;
   }
 
   .professional-style-reference-actions .ghost-button,
   .professional-style-reference-actions .professional-style-reference-action {
-    width: 100%;
+    width: 38px;
     justify-content: center;
   }
 

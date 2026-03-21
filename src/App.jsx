@@ -1793,6 +1793,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   );
   const [storyboardEditorCellId, setStoryboardEditorCellId] = useState("");
   const [storyboardLibraryPickerOpen, setStoryboardLibraryPickerOpen] = useState(false);
+  const [storyboardLibraryPickerPending, setStoryboardLibraryPickerPending] = useState(false);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
   const [storyboardShareCopyState, setStoryboardShareCopyState] = useState("idle");
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
@@ -1804,6 +1805,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const promptTextareaRef = useRef(null);
   const storyboardCaptionTextareaRef = useRef(null);
   const storyboardShareCopyResetTimeoutRef = useRef(null);
+  const storyboardLibraryPickerTimeoutRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
   const imagePreviewPointersRef = useRef(new Map());
@@ -2623,12 +2625,20 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   useEffect(() => {
     setStoryboardLibraryPickerOpen(false);
+    setStoryboardLibraryPickerPending(false);
+    if (storyboardLibraryPickerTimeoutRef.current) {
+      window.clearTimeout(storyboardLibraryPickerTimeoutRef.current);
+      storyboardLibraryPickerTimeoutRef.current = null;
+    }
   }, [storyboardEditorCellId]);
 
   useEffect(() => {
     return () => {
       if (storyboardShareCopyResetTimeoutRef.current) {
         window.clearTimeout(storyboardShareCopyResetTimeoutRef.current);
+      }
+      if (storyboardLibraryPickerTimeoutRef.current) {
+        window.clearTimeout(storyboardLibraryPickerTimeoutRef.current);
       }
     };
   }, []);
@@ -3388,6 +3398,30 @@ function BananaStudioApp({ routeMode = "login" }) {
       record: clonedRecord,
     }));
     setStoryboardLibraryPickerOpen(false);
+  }
+
+  function handleToggleStoryboardLibraryPicker() {
+    if (storyboardLibraryPickerPending) {
+      return;
+    }
+
+    if (storyboardLibraryPickerTimeoutRef.current) {
+      window.clearTimeout(storyboardLibraryPickerTimeoutRef.current);
+      storyboardLibraryPickerTimeoutRef.current = null;
+    }
+
+    if (storyboardLibraryPickerOpen) {
+      setStoryboardLibraryPickerOpen(false);
+      setStoryboardLibraryPickerPending(false);
+      return;
+    }
+
+    setStoryboardLibraryPickerPending(true);
+    storyboardLibraryPickerTimeoutRef.current = window.setTimeout(() => {
+      setStoryboardLibraryPickerOpen(true);
+      setStoryboardLibraryPickerPending(false);
+      storyboardLibraryPickerTimeoutRef.current = null;
+    }, 220);
   }
 
   async function handleCopyStoryboardShare() {
@@ -4483,8 +4517,16 @@ function BananaStudioApp({ routeMode = "login" }) {
                             <span>这张图会自动附加到每个格子的生图请求里。</span>
                           </div>
                           <div className="professional-style-reference-actions">
-                            <label className="ghost-button professional-style-reference-action">
-                              更换图片
+                            <label
+                              className="ghost-button professional-style-reference-action"
+                              aria-label="更换整体画风参考图"
+                              title="上传新图"
+                            >
+                              <svg viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M10 13V4.5" />
+                                <path d="m6.8 7.7 3.2-3.2 3.2 3.2" />
+                                <path d="M4.5 14.5v.6c0 .8.6 1.4 1.4 1.4h8.2c.8 0 1.4-.6 1.4-1.4v-.6" />
+                              </svg>
                               <input
                                 type="file"
                                 accept="image/*"
@@ -4493,10 +4535,18 @@ function BananaStudioApp({ routeMode = "login" }) {
                             </label>
                             <button
                               type="button"
-                              className="ghost-button"
+                              className="ghost-button professional-style-reference-action professional-style-reference-action-danger"
                               onClick={() => handleRemoveReferenceImage(professionalStyleReference.id)}
+                              aria-label="移除整体画风参考图"
+                              title="移除图片"
                             >
-                              移除图片
+                              <svg viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+                                <path d="M4 6h12" />
+                                <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+                                <path d="M8 9v4.5" />
+                                <path d="M12 9v4.5" />
+                              </svg>
                             </button>
                           </div>
                         </div>
@@ -4851,8 +4901,16 @@ function BananaStudioApp({ routeMode = "login" }) {
                         <span>这张图会作为当前格子的额外参考，不会影响其它格子。</span>
                       </div>
                       <div className="professional-style-reference-actions">
-                        <label className="ghost-button professional-style-reference-action">
-                          更换图片
+                        <label
+                          className="ghost-button professional-style-reference-action"
+                          aria-label="更换当前格子的参考图"
+                          title="上传新图"
+                        >
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M10 13V4.5" />
+                            <path d="m6.8 7.7 3.2-3.2 3.2 3.2" />
+                            <path d="M4.5 14.5v.6c0 .8.6 1.4 1.4 1.4h8.2c.8 0 1.4-.6 1.4-1.4v-.6" />
+                          </svg>
                           <input
                             type="file"
                             accept="image/*"
@@ -4861,14 +4919,22 @@ function BananaStudioApp({ routeMode = "login" }) {
                         </label>
                         <button
                           type="button"
-                          className="ghost-button"
+                          className="ghost-button professional-style-reference-action professional-style-reference-action-danger"
                           onClick={() =>
                             handleRemoveStoryboardReferenceImage(
                               storyboardEditorCell.referenceImages[0].id,
                             )
                           }
+                          aria-label="移除当前格子的参考图"
+                          title="移除图片"
                         >
-                          移除图片
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+                            <path d="M4 6h12" />
+                            <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+                            <path d="M8 9v4.5" />
+                            <path d="M12 9v4.5" />
+                          </svg>
                         </button>
                       </div>
                     </div>
@@ -4962,13 +5028,20 @@ function BananaStudioApp({ routeMode = "login" }) {
                 </div>
                 <button
                   type="button"
-                  className="ghost-button storyboard-editor-library-button"
-                  onClick={() =>
-                    setStoryboardLibraryPickerOpen((currentValue) => !currentValue)
-                  }
-                  disabled={storyboardEditorCell.status === "loading"}
+                  className={`ghost-button storyboard-editor-library-button${storyboardLibraryPickerPending ? " is-pending" : ""}`}
+                  onClick={handleToggleStoryboardLibraryPicker}
+                  disabled={storyboardEditorCell.status === "loading" || storyboardLibraryPickerPending}
                 >
-                  {storyboardLibraryPickerOpen ? "收起图片列表" : "选择图片"}
+                  {storyboardLibraryPickerPending ? (
+                    <>
+                      <span className="storyboard-editor-library-spinner" aria-hidden="true" />
+                      历史图片加载中...
+                    </>
+                  ) : storyboardLibraryPickerOpen ? (
+                    "收起历史图片"
+                  ) : (
+                    "选择历史图片"
+                  )}
                 </button>
                 {storyboardLibraryPickerOpen ? (
                   generationLibrary.length > 0 ? (
