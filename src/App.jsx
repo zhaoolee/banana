@@ -1,18 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { DragDropContext, Draggable, Droppable } from "@hello-pangea/dnd";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import localforage from "localforage";
 import AdminApp from "./AdminApp.jsx";
+import { getProfessionalExportLayoutMetrics } from "../shared/professionalExportLayout.js";
 
 const LOGIN_PATH = "/login";
 const STUDIO_PATH = "/studio";
 const PANEL_MODE_STORAGE_KEY = "banana.panelMode";
-const SELECTED_MODEL_STORAGE_KEY = "banana.selectedModelId";
-const SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
-const SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
-const SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.selectedLayoutColumns";
-const SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.selectedImageSize";
-const SELECTED_IMAGE_COUNT_STORAGE_KEY = "banana.selectedImageCount";
-const PROMPT_STORAGE_KEY = "banana.prompt";
+const LEGACY_SELECTED_MODEL_STORAGE_KEY = "banana.selectedModelId";
+const LEGACY_SELECTED_ASPECT_RATIO_STORAGE_KEY = "banana.selectedAspectRatio";
+const LEGACY_SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.selectedLayoutRows";
+const LEGACY_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.selectedLayoutColumns";
+const LEGACY_SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.selectedImageSize";
+const LEGACY_SELECTED_IMAGE_COUNT_STORAGE_KEY = "banana.selectedImageCount";
+const LEGACY_PROMPT_STORAGE_KEY = "banana.prompt";
+const PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY = "banana.professional.selectedModelId";
+const PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY = "banana.professional.globalPrompt";
+const PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY = "banana.professional.canvasSize";
+const PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY = "banana.professional.customCanvasWidth";
+const PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY = "banana.professional.customCanvasHeight";
+const PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.professional.selectedLayoutRows";
+const PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.professional.selectedLayoutColumns";
+const PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY = "banana.professional.storyboardCaptionFontSize";
+const PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY = "banana.professional.storyboardCaptionBackgroundAlpha";
+const PROFESSIONAL_SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.professional.selectedImageSize";
+const PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY = "banana.professional.selectedImageCount";
+const PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY = "professionalStoryboardCells";
+const PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY = "professionalReferenceImages";
+const SIMPLE_PROMPT_STORAGE_KEY = "banana.simple.prompt";
 const LAST_GENERATION_DB_NAME = "banana.studio";
 const LAST_GENERATION_STORE_NAME = "app";
 const LAST_GENERATION_RECORD_KEY = "lastGenerationResult";
@@ -24,6 +38,18 @@ const PROMPT_TEXTAREA_MIN_ROWS = 2;
 const PROMPT_TEXTAREA_MAX_ROWS = 5;
 const PANEL_MODE_SIMPLE = "simple";
 const PANEL_MODE_PROFESSIONAL = "professional";
+const CUSTOM_CANVAS_SIZE_VALUE = "custom";
+const PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO = "1:1";
+const PROFESSIONAL_STYLE_REFERENCE_LIMIT = 1;
+const STORYBOARD_CELL_REFERENCE_LIMIT = 1;
+const DEFAULT_CUSTOM_CANVAS_WIDTH = 1080;
+const DEFAULT_CUSTOM_CANVAS_HEIGHT = 1440;
+const DEFAULT_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 100;
+const MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 70;
+const MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 160;
+const DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 90;
+const MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 72;
+const MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 100;
 const SIMPLE_PANEL_DEFAULTS = {
   modelId: "nano-banana-2",
   aspectRatio: "3:4",
@@ -39,7 +65,7 @@ const ASPECT_RATIO_OPTIONS = [
   { value: "2:3", label: "竖版 2:3" },
   { value: "3:2", label: "横版 3:2" },
   { value: "4:3", label: "横版 4:3" },
-  { value: "3:4", label: "竖版 3:4" },
+  { value: "3:4", label: "小红书封面 3:4（1080 x 1440）" },
   { value: "4:1", label: "超宽 4:1" },
   { value: "4:5", label: "竖版 4:5" },
   { value: "5:4", label: "横版 5:4" },
@@ -48,7 +74,25 @@ const ASPECT_RATIO_OPTIONS = [
   { value: "9:16", label: "竖版 9:16" },
   { value: "21:9", label: "超宽 21:9" },
 ];
+const CANVAS_SIZE_OPTIONS = [
+  { value: "programmer-lv1-lv7", label: "程序员LV1到LV7 544 x 1968", width: 544, height: 1968 },
+  { value: "xiaohongshu-cover", label: "小红书封面 1080 x 1440", width: 1080, height: 1440 },
+  { value: "poster-a4-portrait", label: "海报 A4 竖版", width: 210, height: 297 },
+  { value: "poster-a4-landscape", label: "海报 A4 横版", width: 297, height: 210 },
+  { value: "poster-a3-portrait", label: "海报 A3 竖版", width: 297, height: 420 },
+  { value: "poster-a3-landscape", label: "海报 A3 横版", width: 420, height: 297 },
+  { value: "poster-24x36", label: "海报 24 x 36 in", width: 24, height: 36 },
+  { value: "poster-18x24", label: "海报 18 x 24 in", width: 18, height: 24 },
+  { value: "magazine-us-letter", label: "杂志 Letter 竖版", width: 8.5, height: 11 },
+  { value: "magazine-tabloid", label: "杂志 Tabloid", width: 11, height: 17 },
+  { value: "magazine-square", label: "杂志方版", width: 210, height: 210 },
+];
+const CANVAS_SIZE_SELECT_OPTIONS = [
+  ...CANVAS_SIZE_OPTIONS,
+  { value: CUSTOM_CANVAS_SIZE_VALUE, label: "自定义尺寸" },
+];
 const SUPPORTED_ASPECT_RATIO_VALUES = new Set(ASPECT_RATIO_OPTIONS.map((option) => option.value));
+const SUPPORTED_CANVAS_SIZE_VALUES = new Set(CANVAS_SIZE_OPTIONS.map((option) => option.value));
 const IMAGE_SIZE_OPTIONS = [
   { value: "1K", label: "1K" },
   { value: "2K", label: "2K" },
@@ -100,6 +144,48 @@ function normalizeImageSizeValue(value) {
 function normalizeImageCountValue(value) {
   const parsedValue = Number.parseInt(String(value ?? ""), 10);
   return SUPPORTED_IMAGE_COUNT_VALUES.has(parsedValue) ? parsedValue : 1;
+}
+
+function normalizeCanvasSizeValue(value) {
+  return SUPPORTED_CANVAS_SIZE_VALUES.has(value) || value === CUSTOM_CANVAS_SIZE_VALUE
+    ? value
+    : "poster-a4-portrait";
+}
+
+function normalizeCanvasDimensionValue(value, fallbackValue) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return fallbackValue;
+  }
+
+  return Math.min(Math.max(parsedValue, 64), 10000);
+}
+
+function normalizeStoryboardCaptionFontSizePercent(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_STORYBOARD_CAPTION_FONT_SIZE_PERCENT;
+  }
+
+  return Math.min(
+    Math.max(parsedValue, MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT),
+    MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT,
+  );
+}
+
+function normalizeStoryboardCaptionBackgroundAlphaPercent(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT;
+  }
+
+  return Math.min(
+    Math.max(parsedValue, MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT),
+    MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT,
+  );
 }
 
 function getAspectRatioOrientation(value) {
@@ -200,8 +286,132 @@ function resolveSimplePanelModelId(models, fallbackModelId) {
   return models[0]?.id || "";
 }
 
+function resolveCanvasSizeFromLegacyAspectRatio(aspectRatioValue) {
+  const orientation = getAspectRatioOrientation(aspectRatioValue);
+
+  if (orientation === "landscape") {
+    return "poster-a4-landscape";
+  }
+
+  if (orientation === "square") {
+    return "magazine-square";
+  }
+
+  return "poster-a4-portrait";
+}
+
+function getCanvasSizeOption(value, customWidth = DEFAULT_CUSTOM_CANVAS_WIDTH, customHeight = DEFAULT_CUSTOM_CANVAS_HEIGHT) {
+  if (value === CUSTOM_CANVAS_SIZE_VALUE) {
+    const width = normalizeCanvasDimensionValue(customWidth, DEFAULT_CUSTOM_CANVAS_WIDTH);
+    const height = normalizeCanvasDimensionValue(customHeight, DEFAULT_CUSTOM_CANVAS_HEIGHT);
+
+    return {
+      value: CUSTOM_CANVAS_SIZE_VALUE,
+      label: `自定义 ${width} x ${height}`,
+      width,
+      height,
+    };
+  }
+
+  return CANVAS_SIZE_OPTIONS.find((option) => option.value === value) || CANVAS_SIZE_OPTIONS[0];
+}
+
 function buildLayoutCells(rows, columns) {
   return Array.from({ length: rows * columns }, (_value, index) => index + 1);
+}
+
+function buildStoryboardCellDefinitions(rows, columns) {
+  return buildLayoutCells(rows, columns).map((index) => {
+    const row = Math.floor((index - 1) / columns) + 1;
+    const column = ((index - 1) % columns) + 1;
+
+    return {
+      id: `storyboard-cell-${row}-${column}`,
+      index,
+      row,
+      column,
+      label: `第 ${index} 格`,
+      coordinateLabel: `${row}-${column}`,
+    };
+  });
+}
+
+function createStoryboardCellState(
+  definition,
+  defaultAspectRatio = "1:1",
+  defaultImageSize = "1K",
+) {
+  return {
+    ...definition,
+    prompt: "",
+    caption: "",
+    referenceImages: [],
+    aspectRatio: defaultAspectRatio,
+    imageSize: normalizeImageSizeValue(defaultImageSize),
+    status: "idle",
+    statusText: "",
+    error: "",
+    record: null,
+  };
+}
+
+function normalizeStoryboardCells(
+  currentCells,
+  rows,
+  columns,
+  defaultAspectRatio = "1:1",
+  allowedAspectRatioValues = null,
+  defaultImageSize = "1K",
+  allowedImageSizeValues = null,
+) {
+  return Object.fromEntries(
+    buildStoryboardCellDefinitions(rows, columns).map((definition) => {
+      const currentCell = currentCells?.[definition.id];
+      const normalizedAspectRatio = normalizeAspectRatioValue(
+        currentCell?.aspectRatio || defaultAspectRatio,
+      );
+      const normalizedImageSize = normalizeImageSizeValue(
+        currentCell?.imageSize || defaultImageSize,
+      );
+      const nextAspectRatio =
+        allowedAspectRatioValues && !allowedAspectRatioValues.has(normalizedAspectRatio)
+          ? defaultAspectRatio
+          : normalizedAspectRatio;
+      const nextImageSize =
+        allowedImageSizeValues && !allowedImageSizeValues.has(normalizedImageSize)
+          ? defaultImageSize
+          : normalizedImageSize;
+
+      return [
+        definition.id,
+        currentCell
+          ? {
+              ...currentCell,
+              ...definition,
+              caption: typeof currentCell?.caption === "string" ? currentCell.caption : "",
+              referenceImages: Array.isArray(currentCell?.referenceImages)
+                ? currentCell.referenceImages
+                    .map(restorePersistedReferenceImage)
+                    .filter(Boolean)
+                    .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
+                : [],
+              aspectRatio: nextAspectRatio,
+              imageSize: nextImageSize,
+            }
+          : createStoryboardCellState(definition, defaultAspectRatio, defaultImageSize),
+      ];
+    }),
+  );
+}
+
+function formatStoryboardPromptPreview(value) {
+  const text = normalizeTextValue(value);
+
+  if (!text) {
+    return "点击填写分镜提示词";
+  }
+
+  return text.length > 40 ? `${text.slice(0, 40)}...` : text;
 }
 
 function parseAspectRatio(value) {
@@ -220,6 +430,39 @@ function parseAspectRatio(value) {
   return {
     width: parsedWidth,
     height: parsedHeight,
+  };
+}
+
+function formatAspectRatioCssValue(value) {
+  const { width, height } = parseAspectRatio(value);
+  return `${width} / ${height}`;
+}
+
+function formatCanvasSizeAspectRatioValue(canvasSizeOption) {
+  if (!canvasSizeOption) {
+    return "1:1";
+  }
+
+  return `${canvasSizeOption.width}:${canvasSizeOption.height}`;
+}
+
+function buildProfessionalExportCssVariables(
+  metrics,
+  {
+    captionFontScale = 1,
+    captionBackgroundAlpha = DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT / 100,
+  } = {},
+) {
+  return {
+    "--professional-export-placeholder-padding": `${metrics.placeholderPadding}px`,
+    "--professional-export-placeholder-font-size": `${metrics.placeholderFontSize}px`,
+    "--professional-export-caption-inset": `${metrics.captionInset}px`,
+    "--professional-export-caption-padding-y": `${metrics.captionPaddingY}px`,
+    "--professional-export-caption-padding-x": `${metrics.captionPaddingX}px`,
+    "--professional-export-caption-font-size": `${metrics.captionFontSize}px`,
+    "--professional-export-caption-radius": `${metrics.captionRadius}px`,
+    "--professional-export-caption-font-scale": String(captionFontScale),
+    "--professional-export-caption-background-alpha": String(captionBackgroundAlpha),
   };
 }
 
@@ -589,7 +832,9 @@ async function parseJsonResponse(response) {
   const data = text ? JSON.parse(text) : {};
 
   if (!response.ok) {
-    throw new Error(data.error || "请求失败，请稍后再试");
+    const error = new Error(data.error || "请求失败，请稍后再试");
+    error.status = response.status;
+    throw error;
   }
 
   return data;
@@ -810,12 +1055,73 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
   }
 }
 
-async function requestGeneration(password, payload, handlers) {
-  return requestSseJsonStream(password, "/api/generate/stream", payload, handlers);
+async function requestSimpleGeneration(password, payload, handlers) {
+  try {
+    return await requestSseJsonStream(password, "/api/generate/simple/stream", payload, handlers);
+  } catch (error) {
+    if (error?.status !== 404 && error?.status !== 405) {
+      throw error;
+    }
+
+    return requestSseJsonStream(password, "/api/generate/stream", payload, handlers);
+  }
+}
+
+async function requestProfessionalGeneration(password, payload, handlers) {
+  try {
+    return await requestSseJsonStream(
+      password,
+      "/api/generate/professional/stream",
+      payload,
+      handlers,
+    );
+  } catch (error) {
+    if (error?.status !== 404 && error?.status !== 405) {
+      throw error;
+    }
+
+    return requestSseJsonStream(password, "/api/generate/stream", payload, handlers);
+  }
 }
 
 async function requestEnhancement(password, payload, handlers) {
   return requestSseJsonStream(password, "/api/enhance/stream", payload, handlers);
+}
+
+function parseResponseFilename(response) {
+  const contentDisposition = response.headers.get("content-disposition") || "";
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+  return plainMatch?.[1] || "";
+}
+
+async function requestProfessionalExportPreview(password, payload) {
+  const response = await fetch("/api/export/professional-preview", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildPwHeaders(password),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    return parseJsonResponse(response);
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: parseResponseFilename(response),
+  };
 }
 
 function ReferenceCard({ image, index, onRemove, isDragging = false }) {
@@ -849,6 +1155,120 @@ function ReferenceCard({ image, index, onRemove, isDragging = false }) {
       </button>
     </article>
   );
+}
+
+function buildSimpleGenerationPayload({
+  modelId,
+  prompt,
+  aspectRatio,
+  imageSize,
+  imageCount,
+}) {
+  return {
+    modelId,
+    prompt,
+    imageOptions: {
+      aspectRatio,
+      imageSize,
+      imageCount,
+    },
+  };
+}
+
+function buildProfessionalGenerationPayload({
+  modelId,
+  prompt = "",
+  aspectRatio,
+  imageSize,
+  imageCount,
+  layoutRows,
+  layoutColumns,
+  referenceImages = [],
+}) {
+  return {
+    modelId,
+    prompt,
+    imageOptions: {
+      aspectRatio,
+      imageSize,
+      imageCount,
+      layoutRows,
+      layoutColumns,
+    },
+    // Keep the layout guide local-only. Uploading the preview canvas makes Gemini
+    // treat labels, borders, and placeholders as real visual content.
+    layoutGuideImage: null,
+    referenceImages,
+  };
+}
+
+function buildProfessionalReferenceImages(images = [], limit = PROFESSIONAL_STYLE_REFERENCE_LIMIT) {
+  return images
+    .slice(0, limit)
+    .filter((image) => image?.data && image?.mimeType)
+    .map((image) => ({
+      name: image.name,
+      mimeType: image.mimeType,
+      data: image.data,
+    }));
+}
+
+function buildProfessionalStoryboardPrompt(globalPrompt, cellPrompt) {
+  const normalizedGlobalPrompt = normalizeTextValue(globalPrompt);
+  const normalizedCellPrompt = normalizeTextValue(cellPrompt);
+  const promptParts = [];
+
+  if (normalizedGlobalPrompt) {
+    promptParts.push(`整体要求：${normalizedGlobalPrompt}`);
+  }
+
+  if (normalizedCellPrompt) {
+    promptParts.push(`当前分镜要求：${normalizedCellPrompt}`);
+  }
+
+  return promptParts.join("\n\n");
+}
+
+function buildProfessionalExportPayload({
+  canvasSizeOption,
+  rows,
+  columns,
+  cells,
+  title = "",
+  captionStyle = {},
+}) {
+  return {
+    title: normalizeTextValue(title),
+    canvas: {
+      label: canvasSizeOption?.label || "",
+      width: Number(canvasSizeOption?.width) || 1,
+      height: Number(canvasSizeOption?.height) || 1,
+      rows,
+      columns,
+    },
+    captionStyle: {
+      fontSizePercent: normalizeStoryboardCaptionFontSizePercent(captionStyle.fontSizePercent),
+      backgroundAlphaPercent: normalizeStoryboardCaptionBackgroundAlphaPercent(
+        captionStyle.backgroundAlphaPercent,
+      ),
+    },
+    cells: cells.map((cell) => ({
+      id: cell.id,
+      index: cell.index,
+      row: cell.row,
+      column: cell.column,
+      prompt: normalizeTextValue(cell.prompt),
+      caption: normalizeTextValue(cell.caption),
+      status: cell.status,
+      image:
+        cell.record?.imageBase64 && cell.record?.mimeType
+          ? {
+              mimeType: cell.record.mimeType,
+              data: cell.record.imageBase64,
+            }
+          : null,
+    })),
+  };
 }
 
 function getNextImageSize(currentSize, supportedSizes) {
@@ -968,6 +1388,84 @@ function buildGeneratedImageRecord(data, extraFields = {}) {
   return buildGeneratedImageRecords(data, extraFields)[0] || null;
 }
 
+function buildPersistedStoryboardCells(cells) {
+  if (!cells || typeof cells !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(cells).map(([cellId, cell]) => [
+      cellId,
+      {
+        prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
+        caption: typeof cell?.caption === "string" ? cell.caption : "",
+        referenceImages: Array.isArray(cell?.referenceImages)
+          ? cell.referenceImages
+              .map(buildPersistedReferenceImage)
+              .filter(Boolean)
+              .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
+          : [],
+        aspectRatio: normalizeAspectRatioValue(cell?.aspectRatio),
+        imageSize: normalizeImageSizeValue(cell?.imageSize),
+        record: buildPersistedGenerationResultRecord(cell?.record),
+      },
+    ]),
+  );
+}
+
+function buildPersistedReferenceImage(image) {
+  if (!image?.data || !image?.mimeType) {
+    return null;
+  }
+
+  const { previewUrl: _previewUrl, ...persistedImage } = image;
+  return persistedImage;
+}
+
+function restorePersistedReferenceImage(image) {
+  if (!image?.data || !image?.mimeType) {
+    return null;
+  }
+
+  return {
+    ...image,
+    previewUrl: image.previewUrl || `data:${image.mimeType};base64,${image.data}`,
+  };
+}
+
+function restorePersistedStoryboardCells(cells) {
+  if (!cells || typeof cells !== "object" || Array.isArray(cells)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(cells).map(([cellId, cell]) => {
+      const restoredRecord = restorePersistedGenerationResultRecord(cell?.record);
+
+      return [
+        cellId,
+        {
+          id: cellId,
+          prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
+          caption: typeof cell?.caption === "string" ? cell.caption : "",
+          referenceImages: Array.isArray(cell?.referenceImages)
+            ? cell.referenceImages
+                .map(restorePersistedReferenceImage)
+                .filter(Boolean)
+                .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
+            : [],
+          aspectRatio: normalizeAspectRatioValue(cell?.aspectRatio),
+          imageSize: normalizeImageSizeValue(cell?.imageSize),
+          status: restoredRecord ? "success" : "idle",
+          statusText: "",
+          error: "",
+          record: restoredRecord,
+        },
+      ];
+    }),
+  );
+}
+
 async function readPersistedGenerationLibrary() {
   const persistedRecords = await generationResultStorage.getItem(GENERATION_LIBRARY_RECORDS_KEY);
 
@@ -1000,6 +1498,45 @@ async function writeLastGenerationRecordId(recordId) {
   }
 
   await generationResultStorage.removeItem(LAST_GENERATION_RECORD_ID_KEY);
+}
+
+async function readPersistedStoryboardCells() {
+  const persistedCells = await generationResultStorage.getItem(
+    PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY,
+  );
+
+  return restorePersistedStoryboardCells(persistedCells);
+}
+
+async function writePersistedStoryboardCells(cells) {
+  const persistedCells = buildPersistedStoryboardCells(cells);
+  await generationResultStorage.setItem(PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY, persistedCells);
+}
+
+async function readPersistedReferenceImages() {
+  const persistedImages = await generationResultStorage.getItem(
+    PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY,
+  );
+
+  if (!Array.isArray(persistedImages)) {
+    return [];
+  }
+
+  return persistedImages.map(restorePersistedReferenceImage).filter(Boolean);
+}
+
+async function writePersistedReferenceImages(images) {
+  const persistedImages = images.map(buildPersistedReferenceImage).filter(Boolean);
+
+  if (persistedImages.length > 0) {
+    await generationResultStorage.setItem(
+      PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY,
+      persistedImages,
+    );
+    return;
+  }
+
+  await generationResultStorage.removeItem(PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY);
 }
 
 async function readPersistedGenerationArtifacts() {
@@ -1104,31 +1641,53 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [panelMode, setPanelMode] = useState(() =>
     normalizePanelModeValue(readLocalValue(PANEL_MODE_STORAGE_KEY)),
   );
-  const [selectedModelId, setSelectedModelId] = useState(() =>
-    readLocalValue(SELECTED_MODEL_STORAGE_KEY),
+  const [professionalSelectedModelId, setProfessionalSelectedModelId] = useState(() =>
+    readLocalValue(PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY) ||
+      readLocalValue(LEGACY_SELECTED_MODEL_STORAGE_KEY),
   );
-  const [selectedAspectRatio, setSelectedAspectRatio] = useState(() =>
-    normalizeAspectRatioValue(readLocalValue(SELECTED_ASPECT_RATIO_STORAGE_KEY) || "1:1"),
+  const [professionalGlobalPrompt, setProfessionalGlobalPrompt] = useState(() =>
+    readLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY),
   );
-  const [layoutRows, setLayoutRows] = useState(() =>
-    clampLayoutTrack(readLocalValue(SELECTED_LAYOUT_ROWS_STORAGE_KEY) || 1),
+  const [professionalCanvasSize, setProfessionalCanvasSize] = useState(() =>
+    normalizeCanvasSizeValue(
+      readLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY) ||
+        resolveCanvasSizeFromLegacyAspectRatio(
+          readLocalValue(LEGACY_SELECTED_ASPECT_RATIO_STORAGE_KEY) || "1:1",
+        ),
+    ),
   );
-  const [layoutColumns, setLayoutColumns] = useState(() =>
-    clampLayoutTrack(readLocalValue(SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) || 1),
+  const [professionalLayoutRows, setProfessionalLayoutRows] = useState(() =>
+    clampLayoutTrack(
+      readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
+        readLocalValue(LEGACY_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
+        1,
+    ),
   );
-  const [selectedImageSize, setSelectedImageSize] = useState(() =>
-    normalizeImageSizeValue(readLocalValue(SELECTED_IMAGE_SIZE_STORAGE_KEY) || "1K"),
+  const [professionalLayoutColumns, setProfessionalLayoutColumns] = useState(() =>
+    clampLayoutTrack(
+      readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
+        readLocalValue(LEGACY_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
+        1,
+    ),
   );
-  const [selectedImageCount, setSelectedImageCount] = useState(() =>
-    normalizeImageCountValue(readLocalValue(SELECTED_IMAGE_COUNT_STORAGE_KEY) || 1),
+  const [professionalSelectedImageCount, setProfessionalSelectedImageCount] = useState(() =>
+    normalizeImageCountValue(
+      readLocalValue(PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY) ||
+        readLocalValue(LEGACY_SELECTED_IMAGE_COUNT_STORAGE_KEY) ||
+        1,
+    ),
   );
-  const [prompt, setPrompt] = useState(() => readLocalValue(PROMPT_STORAGE_KEY));
+  const [simplePrompt, setSimplePrompt] = useState(() =>
+    readLocalValue(SIMPLE_PROMPT_STORAGE_KEY) || readLocalValue(LEGACY_PROMPT_STORAGE_KEY),
+  );
   const [referenceImages, setReferenceImages] = useState([]);
+  const [referenceImagesHydrated, setReferenceImagesHydrated] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
   const [remainingQuota, setRemainingQuota] = useState(null);
   const [studioError, setStudioError] = useState("");
   const [studioPending, setStudioPending] = useState(false);
+  const [professionalExportPending, setProfessionalExportPending] = useState(false);
   const [enhancePending, setEnhancePending] = useState(false);
   const [backendRequestCount, setBackendRequestCount] = useState(0);
   const [backendBusyLabel, setBackendBusyLabel] = useState("");
@@ -1160,16 +1719,140 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [uploadDragActive, setUploadDragActive] = useState(false);
   const [referenceDragActive, setReferenceDragActive] = useState(false);
   const [promptMode, setPromptMode] = useState("simple");
+  const [professionalCustomCanvasWidth, setProfessionalCustomCanvasWidth] = useState(() =>
+    normalizeCanvasDimensionValue(
+      readLocalValue(PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY),
+      DEFAULT_CUSTOM_CANVAS_WIDTH,
+    ),
+  );
+  const [professionalCustomCanvasHeight, setProfessionalCustomCanvasHeight] = useState(() =>
+    normalizeCanvasDimensionValue(
+      readLocalValue(PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY),
+      DEFAULT_CUSTOM_CANVAS_HEIGHT,
+    ),
+  );
+  const [professionalStoryboardCaptionFontSizePercent, setProfessionalStoryboardCaptionFontSizePercent] = useState(() =>
+    normalizeStoryboardCaptionFontSizePercent(
+      readLocalValue(PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY),
+    ),
+  );
+  const [professionalStoryboardCaptionBackgroundAlphaPercent, setProfessionalStoryboardCaptionBackgroundAlphaPercent] = useState(() =>
+    normalizeStoryboardCaptionBackgroundAlphaPercent(
+      readLocalValue(PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY),
+    ),
+  );
+  const [storyboardCells, setStoryboardCells] = useState(() =>
+    normalizeStoryboardCells(
+      {},
+      professionalLayoutRows,
+      professionalLayoutColumns,
+      PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
+      null,
+      "1K",
+    ),
+  );
+  const [storyboardEditorCellId, setStoryboardEditorCellId] = useState("");
+  const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
+  const [storyboardCellsHydrated, setStoryboardCellsHydrated] = useState(false);
+  const [professionalExportScale, setProfessionalExportScale] = useState(1);
+  const [professionalExportCardElement, setProfessionalExportCardElement] = useState(null);
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
+  const storyboardCaptionTextareaRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
   const imagePreviewPointersRef = useRef(new Map());
   const imagePreviewPanRef = useRef(null);
   const imagePreviewPinchRef = useRef(null);
-  const hasLayoutValues = Boolean(selectedAspectRatio && layoutRows > 0 && layoutColumns > 0);
+  const hasLayoutValues = Boolean(
+    professionalCanvasSize &&
+      professionalLayoutRows > 0 &&
+      professionalLayoutColumns > 0,
+  );
   const isSimplePanelMode = panelMode === PANEL_MODE_SIMPLE;
   const isProfessionalPanelMode = panelMode === PANEL_MODE_PROFESSIONAL;
+  const showResultPanel = isSimplePanelMode;
+  const showProfessionalExportPanel = isProfessionalPanelMode;
+  const showPromptField = isSimplePanelMode;
+  const isPromptFocusMode = showPromptField && promptMode === "focus";
+  const showSimplePanelSubmit = isSimplePanelMode && !isPromptFocusMode;
+  const showProfessionalPanelControls = isProfessionalPanelMode && !isPromptFocusMode;
+  const storyboardCellDefinitions = useMemo(
+    () => buildStoryboardCellDefinitions(professionalLayoutRows, professionalLayoutColumns),
+    [professionalLayoutColumns, professionalLayoutRows],
+  );
+  const professionalCanvasSizeOption = useMemo(
+    () =>
+      getCanvasSizeOption(
+        professionalCanvasSize,
+        professionalCustomCanvasWidth,
+        professionalCustomCanvasHeight,
+      ),
+    [professionalCanvasSize, professionalCustomCanvasHeight, professionalCustomCanvasWidth],
+  );
+  const professionalStyleReference = referenceImages[0] || null;
+  const storyboardEditorOpen = Boolean(storyboardEditorCellId);
+  const storyboardEditorCell = storyboardEditorCellId
+    ? storyboardCells[storyboardEditorCellId] || null
+    : null;
+  const storyboardCaptionFontScale = professionalStoryboardCaptionFontSizePercent / 100;
+  const storyboardCaptionBackgroundAlpha =
+    professionalStoryboardCaptionBackgroundAlphaPercent / 100;
+  const storyboardGridStyle = useMemo(
+    () => ({
+      gridTemplateColumns: `repeat(${Math.max(professionalLayoutColumns, 1)}, minmax(0, 1fr))`,
+      gridTemplateRows: `repeat(${Math.max(professionalLayoutRows, 1)}, minmax(0, 1fr))`,
+      "--storyboard-caption-font-scale": String(storyboardCaptionFontScale),
+      "--storyboard-caption-background-alpha": String(storyboardCaptionBackgroundAlpha),
+    }),
+    [
+      professionalLayoutColumns,
+      professionalLayoutRows,
+      storyboardCaptionBackgroundAlpha,
+      storyboardCaptionFontScale,
+    ],
+  );
+  const storyboardShellStyle = useMemo(
+    () => ({
+      aspectRatio: `${professionalCanvasSizeOption.width} / ${professionalCanvasSizeOption.height}`,
+    }),
+    [professionalCanvasSizeOption],
+  );
+  const professionalExportMetrics = useMemo(
+    () =>
+      getProfessionalExportLayoutMetrics({
+        canvasWidth: professionalCanvasSizeOption.width,
+        canvasHeight: professionalCanvasSizeOption.height,
+        rows: professionalLayoutRows,
+        columns: professionalLayoutColumns,
+      }),
+    [professionalCanvasSizeOption, professionalLayoutColumns, professionalLayoutRows],
+  );
+  const professionalExportViewportStyle = useMemo(
+    () => ({
+      width: `${professionalCanvasSizeOption.width * professionalExportScale}px`,
+      height: `${professionalCanvasSizeOption.height * professionalExportScale}px`,
+    }),
+    [professionalCanvasSizeOption, professionalExportScale],
+  );
+  const professionalExportSheetStyle = useMemo(
+    () => ({
+      width: `${professionalCanvasSizeOption.width}px`,
+      height: `${professionalCanvasSizeOption.height}px`,
+      transform: `scale(${professionalExportScale})`,
+      ...buildProfessionalExportCssVariables(professionalExportMetrics, {
+        captionFontScale: storyboardCaptionFontScale,
+        captionBackgroundAlpha: storyboardCaptionBackgroundAlpha,
+      }),
+    }),
+    [
+      professionalCanvasSizeOption,
+      professionalExportMetrics,
+      professionalExportScale,
+      storyboardCaptionBackgroundAlpha,
+      storyboardCaptionFontScale,
+    ],
+  );
   const previewRecord = imagePreviewRecord || generationResult;
   const isBackendBusy = backendRequestCount > 0;
   const backendBusyElapsedMs =
@@ -1265,7 +1948,11 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     async function restorePersistedImages() {
       try {
-        const persistedArtifacts = await readPersistedGenerationArtifacts();
+        const [persistedArtifacts, persistedStoryboardCells, persistedReferenceImages] = await Promise.all([
+          readPersistedGenerationArtifacts(),
+          readPersistedStoryboardCells(),
+          readPersistedReferenceImages(),
+        ]);
 
         if (cancelled) {
           return;
@@ -1274,8 +1961,24 @@ function BananaStudioApp({ routeMode = "login" }) {
         setGenerationLibrary(persistedArtifacts.libraryRecords);
         setGenerationResult(persistedArtifacts.currentRecord);
         setGenerationResults(persistedArtifacts.currentRecord ? [persistedArtifacts.currentRecord] : []);
+        setReferenceImages(persistedReferenceImages.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT));
+        setStoryboardCells(
+          normalizeStoryboardCells(
+            persistedStoryboardCells,
+            professionalLayoutRows,
+            professionalLayoutColumns,
+            PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
+            null,
+            "1K",
+          ),
+        );
       } catch (error) {
         console.warn("Restore persisted generation result failed:", error);
+      } finally {
+        if (!cancelled) {
+          setReferenceImagesHydrated(true);
+          setStoryboardCellsHydrated(true);
+        }
       }
     }
 
@@ -1405,12 +2108,14 @@ function BananaStudioApp({ routeMode = "login" }) {
         }
 
         setModels(data.models || []);
-        setSelectedModelId((currentValue) => {
+        setProfessionalSelectedModelId((currentValue) => {
           if (currentValue && data.models?.some((item) => item.id === currentValue)) {
             return currentValue;
           }
 
-          const storedModelId = readLocalValue(SELECTED_MODEL_STORAGE_KEY);
+          const storedModelId =
+            readLocalValue(PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY) ||
+            readLocalValue(LEGACY_SELECTED_MODEL_STORAGE_KEY);
 
           if (storedModelId && data.models?.some((item) => item.id === storedModelId)) {
             return storedModelId;
@@ -1437,11 +2142,11 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [activePw, sessionState]);
 
   const selectedModel = useMemo(() => {
-    return models.find((item) => item.id === selectedModelId) || null;
-  }, [models, selectedModelId]);
+    return models.find((item) => item.id === professionalSelectedModelId) || null;
+  }, [models, professionalSelectedModelId]);
   const simplePanelModelId = useMemo(() => {
-    return resolveSimplePanelModelId(models, selectedModelId);
-  }, [models, selectedModelId]);
+    return resolveSimplePanelModelId(models, "");
+  }, [models]);
   const simplePanelModel = useMemo(() => {
     return models.find((item) => item.id === simplePanelModelId) || null;
   }, [models, simplePanelModelId]);
@@ -1449,10 +2154,70 @@ function BananaStudioApp({ routeMode = "login" }) {
   const availableAspectRatioOptions = useMemo(() => {
     return getModelAspectRatioOptions(selectedModel);
   }, [selectedModel]);
-
+  const availableAspectRatioValueSet = useMemo(
+    () => new Set(availableAspectRatioOptions.map((option) => option.value)),
+    [availableAspectRatioOptions],
+  );
   const availableImageSizeOptions = useMemo(() => {
     return getModelImageSizeOptions(selectedModel);
   }, [selectedModel]);
+  const availableImageSizeValueSet = useMemo(
+    () => new Set(availableImageSizeOptions.map((option) => option.value)),
+    [availableImageSizeOptions],
+  );
+  const professionalDefaultCellAspectRatio = useMemo(() => {
+    if (
+      availableAspectRatioOptions.some(
+        (option) => option.value === PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
+      )
+    ) {
+      return PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO;
+    }
+
+    return availableAspectRatioOptions[0]?.value || "1:1";
+  }, [availableAspectRatioOptions]);
+  const professionalDefaultCellImageSize = useMemo(() => {
+    if (availableImageSizeOptions.some((option) => option.value === "1K")) {
+      return "1K";
+    }
+
+    return availableImageSizeOptions[0]?.value || "1K";
+  }, [availableImageSizeOptions]);
+  const storyboardCellList = useMemo(
+    () =>
+      storyboardCellDefinitions.map(
+        (definition) =>
+          storyboardCells[definition.id] ||
+          createStoryboardCellState(
+            definition,
+            professionalDefaultCellAspectRatio,
+            professionalDefaultCellImageSize,
+          ),
+      ),
+    [
+      professionalDefaultCellAspectRatio,
+      professionalDefaultCellImageSize,
+      storyboardCellDefinitions,
+      storyboardCells,
+    ],
+  );
+  const storyboardHasContent = useMemo(
+    () =>
+      storyboardCellList.some((cell) => normalizeTextValue(cell.prompt) || cell.record),
+    [storyboardCellList],
+  );
+  const storyboardHasLoadingCells = useMemo(
+    () => storyboardCellList.some((cell) => cell.status === "loading"),
+    [storyboardCellList],
+  );
+  const professionalExportHasRenderableContent = useMemo(
+    () =>
+      storyboardCellList.some(
+        (cell) => cell.record || normalizeTextValue(cell.prompt),
+      ),
+    [storyboardCellList],
+  );
+
   const simplePanelAspectRatio = useMemo(() => {
     const simpleAspectRatioOptions = getModelAspectRatioOptions(simplePanelModel);
 
@@ -1471,38 +2236,20 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     return simpleImageSizeOptions[0]?.value || "1K";
   }, [simplePanelModel]);
-  const generationModelId = isSimplePanelMode ? simplePanelModelId : selectedModelId;
-  const generationAspectRatio = isSimplePanelMode ? simplePanelAspectRatio : selectedAspectRatio;
-  const generationImageSize = isSimplePanelMode ? simplePanelImageSize : selectedImageSize;
+  const generationModelId = isSimplePanelMode ? simplePanelModelId : professionalSelectedModelId;
+  const generationAspectRatio = isSimplePanelMode
+    ? simplePanelAspectRatio
+    : professionalDefaultCellAspectRatio;
+  const generationImageSize = isSimplePanelMode ? simplePanelImageSize : professionalDefaultCellImageSize;
   const generationImageCount = isSimplePanelMode
     ? SIMPLE_PANEL_DEFAULTS.imageCount
-    : selectedImageCount;
+    : professionalSelectedImageCount;
   const generationLayoutRows = isSimplePanelMode
     ? SIMPLE_PANEL_DEFAULTS.layoutRows
-    : layoutRows;
+    : professionalLayoutRows;
   const generationLayoutColumns = isSimplePanelMode
     ? SIMPLE_PANEL_DEFAULTS.layoutColumns
-    : layoutColumns;
-  const layoutOrientation = useMemo(() => {
-    return getLayoutOrientation(layoutRows, layoutColumns);
-  }, [layoutColumns, layoutRows]);
-  const aspectRatioOrientation = useMemo(() => {
-    return getAspectRatioOrientation(selectedAspectRatio);
-  }, [selectedAspectRatio]);
-  const recommendedAspectRatios = useMemo(() => {
-    return getRecommendedAspectRatiosForLayout(layoutRows, layoutColumns).filter((value) =>
-      availableAspectRatioOptions.some((option) => option.value === value),
-    );
-  }, [availableAspectRatioOptions, layoutColumns, layoutRows]);
-  const hasAspectRatioLayoutConflict = useMemo(() => {
-    return (
-      layoutRows * layoutColumns > 1 &&
-      layoutOrientation !== "square" &&
-      aspectRatioOrientation !== "square" &&
-      layoutOrientation !== aspectRatioOrientation
-    );
-  }, [aspectRatioOrientation, layoutColumns, layoutOrientation, layoutRows]);
-
+    : professionalLayoutColumns;
   const generationResultModel = useMemo(() => {
     if (!generationResult?.bananaModelId) {
       return null;
@@ -1561,63 +2308,155 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [panelMode]);
 
   useEffect(() => {
-    writeLocalValue(SELECTED_MODEL_STORAGE_KEY, selectedModelId);
-  }, [selectedModelId]);
+    writeLocalValue(PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY, professionalSelectedModelId);
+  }, [professionalSelectedModelId]);
 
   useEffect(() => {
-    if (!SUPPORTED_ASPECT_RATIO_VALUES.has(selectedAspectRatio)) {
-      setSelectedAspectRatio("1:1");
+    writeLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY, professionalGlobalPrompt);
+  }, [professionalGlobalPrompt]);
+
+  useEffect(() => {
+    if (
+      !SUPPORTED_CANVAS_SIZE_VALUES.has(professionalCanvasSize) &&
+      professionalCanvasSize !== CUSTOM_CANVAS_SIZE_VALUE
+    ) {
+      setProfessionalCanvasSize("poster-a4-portrait");
       return;
     }
 
-    writeLocalValue(SELECTED_ASPECT_RATIO_STORAGE_KEY, selectedAspectRatio);
-  }, [selectedAspectRatio]);
+    writeLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY, professionalCanvasSize);
+  }, [professionalCanvasSize]);
 
   useEffect(() => {
-    if (availableAspectRatioOptions.some((option) => option.value === selectedAspectRatio)) {
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY,
+      String(normalizeCanvasDimensionValue(professionalCustomCanvasWidth, DEFAULT_CUSTOM_CANVAS_WIDTH)),
+    );
+  }, [professionalCustomCanvasWidth]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY,
+      String(normalizeCanvasDimensionValue(professionalCustomCanvasHeight, DEFAULT_CUSTOM_CANVAS_HEIGHT)),
+    );
+  }, [professionalCustomCanvasHeight]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY,
+      String(professionalLayoutRows),
+    );
+  }, [professionalLayoutRows]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY,
+      String(professionalLayoutColumns),
+    );
+  }, [professionalLayoutColumns]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY,
+      String(
+        normalizeStoryboardCaptionFontSizePercent(
+          professionalStoryboardCaptionFontSizePercent,
+        ),
+      ),
+    );
+  }, [professionalStoryboardCaptionFontSizePercent]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY,
+      String(
+        normalizeStoryboardCaptionBackgroundAlphaPercent(
+          professionalStoryboardCaptionBackgroundAlphaPercent,
+        ),
+      ),
+    );
+  }, [professionalStoryboardCaptionBackgroundAlphaPercent]);
+
+  useEffect(() => {
+    if (!SUPPORTED_IMAGE_COUNT_VALUES.has(professionalSelectedImageCount)) {
+      setProfessionalSelectedImageCount(1);
       return;
     }
 
-    setSelectedAspectRatio(availableAspectRatioOptions[0]?.value || "1:1");
-  }, [availableAspectRatioOptions, selectedAspectRatio]);
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY,
+      String(professionalSelectedImageCount),
+    );
+  }, [professionalSelectedImageCount]);
 
   useEffect(() => {
-    writeLocalValue(SELECTED_LAYOUT_ROWS_STORAGE_KEY, String(layoutRows));
-  }, [layoutRows]);
+    writeLocalValue(SIMPLE_PROMPT_STORAGE_KEY, simplePrompt);
+  }, [simplePrompt]);
 
   useEffect(() => {
-    writeLocalValue(SELECTED_LAYOUT_COLUMNS_STORAGE_KEY, String(layoutColumns));
-  }, [layoutColumns]);
+    setStoryboardCells((currentValue) =>
+      normalizeStoryboardCells(
+        currentValue,
+        professionalLayoutRows,
+        professionalLayoutColumns,
+        professionalDefaultCellAspectRatio,
+        availableAspectRatioValueSet,
+        professionalDefaultCellImageSize,
+        availableImageSizeValueSet,
+      ),
+    );
+  }, [
+    availableAspectRatioValueSet,
+    availableImageSizeValueSet,
+    professionalDefaultCellAspectRatio,
+    professionalDefaultCellImageSize,
+    professionalLayoutColumns,
+    professionalLayoutRows,
+  ]);
 
   useEffect(() => {
-    if (!SUPPORTED_IMAGE_SIZE_VALUES.has(selectedImageSize)) {
-      setSelectedImageSize("1K");
+    if (!storyboardCellsHydrated || typeof window === "undefined") {
       return;
     }
 
-    writeLocalValue(SELECTED_IMAGE_SIZE_STORAGE_KEY, selectedImageSize);
-  }, [selectedImageSize]);
+    const timeoutId = window.setTimeout(() => {
+      void writePersistedStoryboardCells(storyboardCells).catch((error) => {
+        console.warn("Persist storyboard cells failed:", error);
+      });
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [storyboardCells, storyboardCellsHydrated]);
 
   useEffect(() => {
-    if (availableImageSizeOptions.some((option) => option.value === selectedImageSize)) {
+    if (!referenceImagesHydrated || typeof window === "undefined") {
       return;
     }
 
-    setSelectedImageSize(availableImageSizeOptions[0]?.value || "1K");
-  }, [availableImageSizeOptions, selectedImageSize]);
+    const timeoutId = window.setTimeout(() => {
+      void writePersistedReferenceImages(referenceImages).catch((error) => {
+        console.warn("Persist professional reference images failed:", error);
+      });
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [referenceImages, referenceImagesHydrated]);
 
   useEffect(() => {
-    if (!SUPPORTED_IMAGE_COUNT_VALUES.has(selectedImageCount)) {
-      setSelectedImageCount(1);
+    if (!storyboardEditorCellId) {
       return;
     }
 
-    writeLocalValue(SELECTED_IMAGE_COUNT_STORAGE_KEY, String(selectedImageCount));
-  }, [selectedImageCount]);
+    if (storyboardCells[storyboardEditorCellId]) {
+      return;
+    }
 
-  useEffect(() => {
-    writeLocalValue(PROMPT_STORAGE_KEY, prompt);
-  }, [prompt]);
+    setStoryboardEditorCellId("");
+  }, [storyboardCells, storyboardEditorCellId]);
 
   useEffect(() => {
     if (!hasLayoutValues) {
@@ -1625,11 +2464,16 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     drawLayoutGuide(layoutCanvasRef.current, {
-      aspectRatio: selectedAspectRatio,
-      rows: layoutRows,
-      columns: layoutColumns,
+      aspectRatio: formatCanvasSizeAspectRatioValue(professionalCanvasSizeOption),
+      rows: professionalLayoutRows,
+      columns: professionalLayoutColumns,
     });
-  }, [hasLayoutValues, layoutColumns, layoutRows, selectedAspectRatio]);
+  }, [
+    hasLayoutValues,
+    professionalCanvasSizeOption,
+    professionalLayoutColumns,
+    professionalLayoutRows,
+  ]);
 
   useEffect(() => {
     const textarea = promptTextareaRef.current;
@@ -1638,17 +2482,17 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    if (promptMode === "focus") {
+    if (isPromptFocusMode) {
       textarea.style.height = "100%";
       textarea.style.overflowY = "auto";
       return;
     }
 
     resizePromptTextarea(textarea);
-  }, [prompt, promptMode]);
+  }, [isPromptFocusMode, simplePrompt]);
 
   useEffect(() => {
-    if (promptMode !== "focus") {
+    if (!isPromptFocusMode) {
       return;
     }
 
@@ -1662,16 +2506,98 @@ function BananaStudioApp({ routeMode = "login" }) {
       textarea.focus({ preventScroll: true });
       textarea.setSelectionRange(textarea.value.length, textarea.value.length);
     });
-  }, [promptMode]);
+  }, [isPromptFocusMode]);
 
   useEffect(() => {
-    if (panelMode === PANEL_MODE_SIMPLE && promptMode === "focus") {
+    const textarea = storyboardCaptionTextareaRef.current;
+
+    if (!textarea || !storyboardEditorOpen) {
+      return;
+    }
+
+    resizePromptTextarea(textarea);
+  }, [storyboardEditorOpen, storyboardEditorCell?.id, storyboardEditorCell?.caption]);
+
+  useLayoutEffect(() => {
+    const card = professionalExportCardElement;
+
+    if (!card || !showProfessionalExportPanel) {
+      setProfessionalExportScale(1);
+      return;
+    }
+
+    const updateScale = () => {
+      const measuredCardWidth = card.getBoundingClientRect().width;
+      const availableWidth = Math.max(measuredCardWidth, 1);
+      const maxPreviewHeight = Math.max(
+        Math.min(window.innerHeight * 0.72, 860),
+        320,
+      );
+      const nextScale = Math.min(
+        availableWidth / professionalCanvasSizeOption.width,
+        maxPreviewHeight / professionalCanvasSizeOption.height,
+        1,
+      );
+
+      setProfessionalExportScale((currentScale) =>
+        Math.abs(currentScale - nextScale) < 0.001 ? currentScale : nextScale,
+      );
+    };
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      updateScale();
+    });
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateScale);
+
+      return () => {
+        window.cancelAnimationFrame(animationFrameId);
+        window.removeEventListener("resize", updateScale);
+      };
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateScale();
+    });
+
+    resizeObserver.observe(card);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      resizeObserver.disconnect();
+    };
+  }, [
+    professionalExportCardElement,
+    professionalCanvasSizeOption.height,
+    professionalCanvasSizeOption.width,
+    showProfessionalExportPanel,
+  ]);
+
+  useEffect(() => {
+    if (!showPromptField && promptMode === "focus") {
       setPromptMode("simple");
     }
-  }, [panelMode, promptMode]);
+  }, [promptMode, showPromptField]);
 
   useEffect(() => {
-    if ((!imagePreviewOpen && !resourceManagerOpen) || typeof window === "undefined" || typeof document === "undefined") {
+    if (isProfessionalPanelMode) {
+      return;
+    }
+
+    setStoryboardEditorCellId("");
+    setStoryboardClearConfirmOpen(false);
+  }, [isProfessionalPanelMode]);
+
+  useEffect(() => {
+    if (
+      (!imagePreviewOpen &&
+        !resourceManagerOpen &&
+        !storyboardEditorOpen &&
+        !storyboardClearConfirmOpen) ||
+      typeof window === "undefined" ||
+      typeof document === "undefined"
+    ) {
       return;
     }
 
@@ -1689,6 +2615,16 @@ function BananaStudioApp({ routeMode = "login" }) {
       if (event.key === "Escape") {
         if (imagePreviewOpen) {
           closeImagePreview();
+          return;
+        }
+
+        if (storyboardClearConfirmOpen) {
+          closeStoryboardClearConfirm();
+          return;
+        }
+
+        if (storyboardEditorOpen) {
+          closeStoryboardEditor();
           return;
         }
 
@@ -1747,7 +2683,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", handleResize);
     };
-  }, [imagePreviewOpen, resourceManagerOpen]);
+  }, [imagePreviewOpen, resourceManagerOpen, storyboardClearConfirmOpen, storyboardEditorOpen]);
 
   useEffect(() => {
     if (!imagePreviewOpen) {
@@ -1810,9 +2746,9 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     drawLayoutGuide(node, {
-      aspectRatio: selectedAspectRatio,
-      rows: layoutRows,
-      columns: layoutColumns,
+      aspectRatio: formatCanvasSizeAspectRatioValue(professionalCanvasSizeOption),
+      rows: professionalLayoutRows,
+      columns: professionalLayoutColumns,
     });
   }
 
@@ -1832,22 +2768,105 @@ function BananaStudioApp({ routeMode = "login" }) {
     anchor.remove();
   }
 
+  async function handleDownloadProfessionalExport() {
+    if (!activePw || !professionalExportHasRenderableContent) {
+      return;
+    }
+
+    setStudioError("");
+    setProfessionalExportPending(true);
+    const releaseBackendRequest = beginBackendRequest(
+      "正在导出专业模式预览...",
+      secondsToEstimateMs(12),
+    );
+
+    try {
+      const { blob, filename } = await requestProfessionalExportPreview(
+        activePw,
+        buildProfessionalExportPayload({
+          canvasSizeOption: professionalCanvasSizeOption,
+          rows: professionalLayoutRows,
+          columns: professionalLayoutColumns,
+          cells: storyboardCellList,
+          title: professionalGlobalPrompt || "专业模式导出预览",
+          captionStyle: {
+            fontSizePercent: professionalStoryboardCaptionFontSizePercent,
+            backgroundAlphaPercent: professionalStoryboardCaptionBackgroundAlphaPercent,
+          },
+        }),
+      );
+
+      if (typeof document !== "undefined") {
+        const downloadUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = downloadUrl;
+        anchor.download =
+          filename ||
+          buildDownloadNameWithOptions({
+            mimeType: "image/png",
+            suffix: "professional-export",
+          });
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      }
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "导出预览失败");
+    } finally {
+      releaseBackendRequest();
+      setProfessionalExportPending(false);
+    }
+  }
+
   async function appendReferenceFiles(files) {
     try {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-      const remainingSlots = MAX_REFERENCE_IMAGES - referenceImages.length;
-      const nextFiles = imageFiles.slice(0, Math.max(remainingSlots, 0));
+      const nextFiles = imageFiles.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT);
 
       if (nextFiles.length === 0) {
-        setStudioError(`最多上传 ${MAX_REFERENCE_IMAGES} 张参考图`);
+        setStudioError("请上传 1 张图片作为整体画风参考");
         return;
       }
 
       const parsedImages = await Promise.all(nextFiles.map(readFileAsReferenceImage));
-      setReferenceImages((currentValue) => [...currentValue, ...parsedImages]);
+      setReferenceImages(parsedImages);
       setStudioError("");
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "图片读取失败");
+    }
+  }
+
+  async function appendStoryboardReferenceFiles(files) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    try {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      const nextFiles = imageFiles.slice(0, STORYBOARD_CELL_REFERENCE_LIMIT);
+
+      if (nextFiles.length === 0) {
+        updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+          ...cell,
+          error: "请上传 1 张图片作为当前格子的参考图",
+        }));
+        return;
+      }
+
+      const parsedImages = await Promise.all(nextFiles.map(readFileAsReferenceImage));
+      updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+        ...cell,
+        referenceImages: parsedImages,
+        error: "",
+      }));
+      setStudioError("");
+    } catch (error) {
+      updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+        ...cell,
+        error: error instanceof Error ? error.message : "参考图读取失败",
+      }));
     }
   }
 
@@ -1860,6 +2879,20 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     try {
       await appendReferenceFiles(files);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function handleStoryboardReferenceFileChange(event) {
+    const files = Array.from(event.target.files || []);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      await appendStoryboardReferenceFiles(files);
     } finally {
       event.target.value = "";
     }
@@ -1899,6 +2932,20 @@ function BananaStudioApp({ routeMode = "login" }) {
     setReferenceImages((currentValue) =>
       currentValue.filter((image) => image.id !== imageId),
     );
+  }
+
+  function handleRemoveStoryboardReferenceImage(imageId) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+      ...cell,
+      referenceImages: Array.isArray(cell.referenceImages)
+        ? cell.referenceImages.filter((image) => image.id !== imageId)
+        : [],
+      error: "",
+    }));
   }
 
   function scrollReferenceItemIntoView(index) {
@@ -2050,10 +3097,240 @@ function BananaStudioApp({ routeMode = "login" }) {
     );
   }
 
+  function updateStoryboardCell(cellId, updater) {
+    setStoryboardCells((currentValue) => {
+      const cell = currentValue[cellId];
+
+      if (!cell) {
+        return currentValue;
+      }
+
+      const nextCell =
+        typeof updater === "function"
+          ? updater(cell)
+          : {
+              ...cell,
+              ...updater,
+            };
+
+      return {
+        ...currentValue,
+        [cellId]: nextCell,
+      };
+    });
+  }
+
+  function openStoryboardEditor(cellId) {
+    const cell = storyboardCells[cellId];
+
+    if (!cell || cell.status === "loading") {
+      return;
+    }
+
+    setStoryboardEditorCellId(cellId);
+  }
+
+  function closeStoryboardEditor() {
+    setStoryboardEditorCellId("");
+  }
+
+  function openStoryboardClearConfirm() {
+    if (!storyboardHasContent || storyboardHasLoadingCells) {
+      return;
+    }
+
+    setStoryboardClearConfirmOpen(true);
+  }
+
+  function closeStoryboardClearConfirm() {
+    setStoryboardClearConfirmOpen(false);
+  }
+
+  function handleClearStoryboard() {
+    if (storyboardHasLoadingCells) {
+      return;
+    }
+
+    setStoryboardCells(
+      normalizeStoryboardCells(
+        {},
+        professionalLayoutRows,
+        professionalLayoutColumns,
+        professionalDefaultCellAspectRatio,
+        availableAspectRatioValueSet,
+        professionalDefaultCellImageSize,
+        availableImageSizeValueSet,
+      ),
+    );
+    closeStoryboardClearConfirm();
+    closeStoryboardEditor();
+  }
+
+  function handleStoryboardPromptChange(value) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+      ...cell,
+      prompt: value,
+      error: "",
+    }));
+  }
+
+  function handleStoryboardCaptionChange(value) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+      ...cell,
+      caption: value,
+      error: "",
+    }));
+  }
+
+  function handleStoryboardAspectRatioChange(value) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+      ...cell,
+      aspectRatio: normalizeAspectRatioValue(value),
+      error: "",
+    }));
+  }
+
+  function handleStoryboardImageSizeChange(value) {
+    if (!storyboardEditorCellId) {
+      return;
+    }
+
+    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+      ...cell,
+      imageSize: normalizeImageSizeValue(value),
+      error: "",
+    }));
+  }
+
+  async function handleStoryboardCellGenerate() {
+    if (!storyboardEditorCell || !activePw) {
+      return;
+    }
+
+    const editorCell = storyboardEditorCell;
+    const cellId = editorCell.id;
+    const promptValue = normalizeTextValue(storyboardEditorCell.prompt);
+    const requestedPromptValue = buildProfessionalStoryboardPrompt(
+      professionalGlobalPrompt,
+      promptValue,
+    );
+
+    if (!promptValue) {
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        error: "请先填写这个格子的提示词",
+      }));
+      return;
+    }
+
+    if (!generationModelId) {
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        error: "请先选择一个 banana 模型",
+      }));
+      return;
+    }
+
+    const previousRecord = editorCell.record || null;
+
+    updateStoryboardCell(cellId, (cell) => ({
+      ...cell,
+      status: "loading",
+      statusText: "banana 正在生图...",
+      error: "",
+    }));
+    closeStoryboardEditor();
+
+    try {
+      const mergedReferenceImages = [
+        ...buildProfessionalReferenceImages(referenceImages),
+        ...buildProfessionalReferenceImages(
+          editorCell.referenceImages,
+          STORYBOARD_CELL_REFERENCE_LIMIT,
+        ),
+      ];
+      const data = await requestProfessionalGeneration(
+        activePw,
+        buildProfessionalGenerationPayload({
+          modelId: generationModelId,
+          prompt: requestedPromptValue,
+          aspectRatio: editorCell.aspectRatio || professionalDefaultCellAspectRatio,
+          imageSize: editorCell.imageSize || professionalDefaultCellImageSize,
+          imageCount: 1,
+          layoutRows: 1,
+          layoutColumns: 1,
+          referenceImages: mergedReferenceImages,
+        }),
+        {
+          onStatus: (eventPayload) => {
+            if (!eventPayload?.message) {
+              return;
+            }
+
+            updateStoryboardCell(cellId, (cell) => ({
+              ...cell,
+              statusText: eventPayload.message,
+            }));
+          },
+        },
+      );
+      const nextResult = buildGeneratedImageRecord(data, {
+        promptSnapshot: requestedPromptValue,
+        storyboardCellId: cellId,
+        storyboardCellLabel: editorCell.label,
+        storyboardCellCoordinate: editorCell.coordinateLabel,
+      });
+
+      if (!nextResult) {
+        throw new Error("banana 没有返回可用图片");
+      }
+
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        status: "success",
+        statusText: "生成完成",
+        error: "",
+        record: nextResult,
+      }));
+      setCurrentGenerationSelection([nextResult], nextResult);
+      setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
+
+      try {
+        await persistGeneratedRecord(nextResult);
+      } catch (error) {
+        console.warn("Persist storyboard cell result failed:", error);
+        updateStoryboardCell(cellId, (cell) => ({
+          ...cell,
+          error: "图片已生成，但写入本地资源管理器失败",
+        }));
+      }
+    } catch (error) {
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        status: previousRecord ? "success" : "idle",
+        statusText: "",
+        error: error instanceof Error ? error.message : "banana 生图失败",
+        record: previousRecord,
+      }));
+    }
+  }
+
   async function handleGenerate(event) {
     event.preventDefault();
 
-    if (!prompt.trim()) {
+    if (isSimplePanelMode && !simplePrompt.trim()) {
       setStudioError("请输入你希望 banana 生成的画面要求");
       return;
     }
@@ -2071,27 +3348,30 @@ function BananaStudioApp({ routeMode = "login" }) {
     );
 
     try {
-      const payload = {
-        modelId: generationModelId,
-        prompt,
-        imageOptions: {
-          aspectRatio: generationAspectRatio,
-          imageSize: generationImageSize,
-          imageCount: generationImageCount,
-          layoutRows: generationLayoutRows,
-          layoutColumns: generationLayoutColumns,
-        },
-        // Keep the layout guide local-only. Uploading the preview canvas makes Gemini
-        // treat labels, borders, and placeholders as real visual content.
-        layoutGuideImage: null,
-        referenceImages: referenceImages.map((image) => ({
-          name: image.name,
-          mimeType: image.mimeType,
-          data: image.data,
-        })),
-      };
+      const payload = isSimplePanelMode
+        ? buildSimpleGenerationPayload({
+            modelId: generationModelId,
+            prompt: simplePrompt,
+            aspectRatio: generationAspectRatio,
+            imageSize: generationImageSize,
+            imageCount: generationImageCount,
+          })
+        : buildProfessionalGenerationPayload({
+            modelId: generationModelId,
+            prompt: professionalGlobalPrompt,
+            aspectRatio: generationAspectRatio,
+            imageSize: generationImageSize,
+            imageCount: generationImageCount,
+            layoutRows: generationLayoutRows,
+            layoutColumns: generationLayoutColumns,
+            referenceImages: buildProfessionalReferenceImages(referenceImages),
+          });
 
-      const data = await requestGeneration(activePw, payload, {
+      const requestGenerate = isSimplePanelMode
+        ? requestSimpleGeneration
+        : requestProfessionalGeneration;
+
+      const data = await requestGenerate(activePw, payload, {
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
@@ -2108,7 +3388,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         },
       });
       const nextResults = buildGeneratedImageRecords(data, {
-        promptSnapshot: prompt,
+        promptSnapshot: isSimplePanelMode ? simplePrompt : professionalGlobalPrompt,
       });
 
       if (nextResults.length === 0) {
@@ -2149,17 +3429,17 @@ function BananaStudioApp({ routeMode = "login" }) {
     try {
       const payload = {
         modelId: generationResult.bananaModelId,
-        prompt: generationResult.promptSnapshot || prompt,
+        prompt: generationResult.promptSnapshot || simplePrompt,
         sourceImage: {
           name: `enhance-source-${generationResult.savedRecord?.id || "current"}.png`,
           mimeType: generationResult.mimeType,
           data: generationResult.imageBase64,
         },
         imageOptions: {
-          aspectRatio: generationResult.aspectRatio || selectedAspectRatio,
+          aspectRatio: generationResult.aspectRatio || professionalDefaultCellAspectRatio,
           imageSize: enhancementTargetImageSize,
-          layoutRows: generationResult.layoutRows || layoutRows,
-          layoutColumns: generationResult.layoutColumns || layoutColumns,
+          layoutRows: generationResult.layoutRows || professionalLayoutRows,
+          layoutColumns: generationResult.layoutColumns || professionalLayoutColumns,
         },
         // Preserve panel structure through text instructions instead of sending the
         // local guide canvas, which can leak guide visuals into the final image.
@@ -2187,7 +3467,7 @@ function BananaStudioApp({ routeMode = "login" }) {
           ...data,
         },
         {
-          promptSnapshot: generationResult?.promptSnapshot || prompt,
+          promptSnapshot: generationResult?.promptSnapshot || simplePrompt,
         },
       );
 
@@ -2584,98 +3864,175 @@ function BananaStudioApp({ routeMode = "login" }) {
         </div>
       </header>
 
-      <main className="studio-layout">
-        <section className="studio-panel result-panel">
-          <div className="section-title">
-            <h2>生成结果</h2>
-            <p>完成后可以直接预览和下载。</p>
-          </div>
+      <main className={`studio-layout${isProfessionalPanelMode ? " is-professional-layout" : ""}`}>
+        {showResultPanel || showProfessionalExportPanel ? (
+          <section className={`studio-panel result-panel${showProfessionalExportPanel ? " professional-export-panel" : ""}`}>
+            {showResultPanel ? (
+              <>
+                <div className="section-title">
+                  <h2>生成结果</h2>
+                  <p>完成后可以直接预览和下载。</p>
+                </div>
 
-          {generationResult ? (
-            <div className="result-card">
-              <div className="result-toolbar">
-                {generationResult.imageSize ? (
-                  <span className="result-chip">
-                    {generationResults.length > 1 ? `已生成 ${generationResults.length} 张独立图片 · ` : ""}
-                    {generationResult.imageSize} · {generationResult.aspectRatio}
-                  </span>
-                ) : null}
-                <div className="result-toolbar-actions">
-                  {canEnhanceGeneration ? (
+                {generationResult ? (
+                  <div className="result-card">
+                    <div className="result-toolbar">
+                      {generationResult.imageSize ? (
+                        <span className="result-chip">
+                          {generationResults.length > 1 ? `已生成 ${generationResults.length} 张独立图片 · ` : ""}
+                          {generationResult.imageSize} · {generationResult.aspectRatio}
+                        </span>
+                      ) : null}
+                      <div className="result-toolbar-actions">
+                        {canEnhanceGeneration ? (
+                          <button
+                            type="button"
+                            className="enhance-button"
+                            onClick={handleEnhanceGeneration}
+                            disabled={enhancePending || studioPending}
+                          >
+                            {enhancePending
+                              ? `提升到 ${enhancementTargetImageSize} 中...`
+                              : `提升清晰度 · 目标 ${enhancementTargetImageSize}`}
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                    {generationResults.length > 1 ? (
+                      <div className="result-variant-grid">
+                        {generationResults.map((record, index) => {
+                          const isActive = record.id === generationResult.id;
+
+                          return (
+                            <button
+                              key={record.id}
+                              type="button"
+                              className={`result-variant-button${isActive ? " is-active" : ""}`}
+                              onClick={() => handleSelectGenerationResult(record)}
+                              aria-pressed={isActive}
+                            >
+                              <span className="result-variant-media">
+                                <img
+                                  className="result-variant-image"
+                                  src={record.previewUrl}
+                                  alt={`Banana generated variant ${index + 1}`}
+                                  draggable="false"
+                                />
+                                <span className="result-variant-label">{index + 1}</span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                     <button
                       type="button"
-                      className="enhance-button"
-                      onClick={handleEnhanceGeneration}
-                      disabled={enhancePending || studioPending}
+                      className="result-image-button"
+                      onClick={() => openImagePreview(generationResult)}
+                      aria-label="打开图片预览"
                     >
-                      {enhancePending
-                        ? `提升到 ${enhancementTargetImageSize} 中...`
-                        : `提升清晰度 · 目标 ${enhancementTargetImageSize}`}
+                      <img
+                        className="result-image"
+                        src={generationResult.previewUrl}
+                        alt="Banana generated result"
+                        draggable="false"
+                      />
                     </button>
-                  ) : null}
-                </div>
-              </div>
-              {generationResults.length > 1 ? (
-                <div className="result-variant-grid">
-                  {generationResults.map((record, index) => {
-                    const isActive = record.id === generationResult.id;
+                    <a
+                      className="download-link"
+                      href={generationResult.previewUrl}
+                      download={generationResult.downloadName}
+                    >
+                      下载图片
+                    </a>
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    <p>结果区还没有图片。</p>
+                    <small>选好 banana 模型，写下要求后生成。</small>
+                  </div>
+                )}
+              </>
+            ) : null}
 
-                    return (
-                      <button
-                        key={record.id}
-                        type="button"
-                        className={`result-variant-button${isActive ? " is-active" : ""}`}
-                        onClick={() => handleSelectGenerationResult(record)}
-                        aria-pressed={isActive}
-                      >
-                        <span className="result-variant-media">
-                          <img
-                            className="result-variant-image"
-                            src={record.previewUrl}
-                            alt={`Banana generated variant ${index + 1}`}
-                            draggable="false"
-                          />
-                          <span className="result-variant-label">{index + 1}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
+            {showProfessionalExportPanel ? (
+              <>
+                <div className="section-title">
+                  <h2>专业模式导出预览</h2>
+                  <p>下载时会由后端使用 Playwright 对下方表格截图并返回 PNG。</p>
                 </div>
-              ) : null}
-              <button
-                type="button"
-                className="result-image-button"
-                onClick={() => openImagePreview(generationResult)}
-                aria-label="打开图片预览"
-              >
-                <img
-                  className="result-image"
-                  src={generationResult.previewUrl}
-                  alt="Banana generated result"
-                  draggable="false"
-                />
-              </button>
-              <a
-                className="download-link"
-                href={generationResult.previewUrl}
-                download={generationResult.downloadName}
-              >
-                下载图片
-              </a>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <p>结果区还没有图片。</p>
-              <small>选好 banana 模型，上传参考图，写下要求后生成。</small>
-            </div>
-          )}
-        </section>
+
+                <div className="professional-export-card" ref={setProfessionalExportCardElement}>
+                  <div className="result-toolbar">
+                    <span className="result-chip">
+                      {professionalCanvasSizeOption.label} · {professionalLayoutRows} 行 × {professionalLayoutColumns} 列
+                    </span>
+                    <div className="result-toolbar-actions">
+                      <button
+                        type="button"
+                        className="primary-button professional-export-download-button"
+                        onClick={handleDownloadProfessionalExport}
+                        disabled={professionalExportPending || !professionalExportHasRenderableContent}
+                      >
+                        {professionalExportPending ? "正在导出..." : "下载"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {normalizeTextValue(professionalGlobalPrompt) ? (
+                    <p className="professional-export-global-prompt">
+                      整体提示词：{normalizeTextValue(professionalGlobalPrompt)}
+                    </p>
+                  ) : null}
+                  <div className="professional-export-stage">
+                    <div className="professional-export-viewport" style={professionalExportViewportStyle}>
+                      <div className="professional-export-sheet" style={professionalExportSheetStyle}>
+                        <div
+                          id="professional-export-preview-capture"
+                          className="professional-export-grid"
+                          style={storyboardGridStyle}
+                        >
+                          {storyboardCellList.map((cell) => (
+                            <div
+                              key={cell.id}
+                              className={`professional-export-cell${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
+                            >
+                              {cell.record ? (
+                                <img
+                                  className="professional-export-cell-image"
+                                  src={cell.record.previewUrl}
+                                  alt={`${cell.label} 导出预览`}
+                                  draggable="false"
+                                />
+                              ) : (
+                                <div className="professional-export-placeholder">
+                                  {normalizeTextValue(cell.prompt) || "待生成"}
+                                </div>
+                              )}
+                              {normalizeTextValue(cell.caption) ? (
+                                <span className="professional-export-cell-caption">
+                                  <span className="professional-export-cell-caption-text">
+                                    {normalizeTextValue(cell.caption)}
+                                  </span>
+                                </span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : null}
+          </section>
+        ) : null}
 
         <section
-          className={`studio-panel prompt-panel${promptMode === "focus" ? " is-focus-mode" : ""}`}
+          className={`studio-panel prompt-panel${isPromptFocusMode ? " is-focus-mode" : ""}`}
         >
           <form
-            className={`prompt-form${promptMode === "focus" ? " is-focus-mode" : ""}${isSimplePanelMode ? " is-simple-panel" : ""}`}
+            className={`prompt-form${isPromptFocusMode ? " is-focus-mode" : ""}${isSimplePanelMode ? " is-simple-panel" : ""}`}
             onSubmit={handleGenerate}
           >
             <div className="panel-mode-switcher" role="tablist" aria-label="右侧面板模式">
@@ -2698,166 +4055,37 @@ function BananaStudioApp({ routeMode = "login" }) {
                 专业模式
               </button>
             </div>
-            <div className="prompt-field-header">
-              <label className="field-label" htmlFor="prompt">
-                文本要求
-              </label>
-              {isProfessionalPanelMode ? (
-                <button
-                  type="button"
-                  className={`prompt-mode-button${promptMode === "focus" ? " is-active" : ""}`}
-                  onClick={togglePromptMode}
-                  aria-label={promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
-                  title={promptMode === "focus" ? "退出专注输入" : "进入专注输入"}
-                >
-                  <span className="sr-only">
-                    {promptMode === "focus" ? "退出专注输入模式" : "进入专注输入模式"}
-                  </span>
-                  {promptMode === "focus" ? (
-                    <svg viewBox="0 0 20 20" aria-hidden="true">
-                      <path d="M7 3H3v4" />
-                      <path d="M13 3h4v4" />
-                      <path d="M17 13v4h-4" />
-                      <path d="M3 13v4h4" />
-                      <path d="M3 7l5-4" />
-                      <path d="M17 7l-5-4" />
-                      <path d="M17 13l-5 4" />
-                      <path d="M3 13l5 4" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 20 20" aria-hidden="true">
-                      <path d="M7 3H3v4" />
-                      <path d="M13 3h4v4" />
-                      <path d="M17 13v4h-4" />
-                      <path d="M3 13v4h4" />
-                      <path d="M3 7l5 5" />
-                      <path d="M17 7l-5 5" />
-                      <path d="M17 13l-5-5" />
-                      <path d="M3 13l5-5" />
-                    </svg>
-                  )}
-                </button>
-              ) : null}
-            </div>
-            <textarea
-              ref={promptTextareaRef}
-              id="prompt"
-              name="prompt"
-              rows={PROMPT_TEXTAREA_MIN_ROWS}
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (promptMode === "focus" && event.key === "Escape") {
-                  event.preventDefault();
-                  setPromptMode("simple");
-                }
-              }}
-              placeholder="描述你想要的 banana 画面、风格、镜头、材质、色调和构图"
-            />
+            {showPromptField ? (
+              <>
+                <div className="prompt-field-header">
+                  <label className="field-label" htmlFor="prompt">
+                    文本要求
+                  </label>
+                </div>
+                <textarea
+                  ref={promptTextareaRef}
+                  id="prompt"
+                  name="prompt"
+                  rows={PROMPT_TEXTAREA_MIN_ROWS}
+                  value={simplePrompt}
+                  onChange={(event) => setSimplePrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (isPromptFocusMode && event.key === "Escape") {
+                      event.preventDefault();
+                      setPromptMode("simple");
+                    }
+                  }}
+                  placeholder="描述你想要的 banana 画面、风格、镜头、材质、色调和构图"
+                />
 
-            {promptMode === "focus" ? (
-              <div className="focus-mode-note">按 `Esc` 也可以退出专注输入。</div>
+                {isPromptFocusMode ? (
+                  <div className="focus-mode-note">按 `Esc` 也可以退出专注输入。</div>
+                ) : null}
+              </>
             ) : null}
 
-            {promptMode !== "focus" && isProfessionalPanelMode ? (
+            {showProfessionalPanelControls ? (
               <>
-                <label
-                  className={`upload-box${uploadDragActive ? " is-drag-active" : ""}`}
-                  htmlFor="referenceImages"
-                  onDragOver={handleUploadDragOver}
-                  onDragLeave={handleUploadDragLeave}
-                  onDrop={handleUploadDrop}
-                >
-                  <input
-                    id="referenceImages"
-                    name="referenceImages"
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={handleFileChange}
-                  />
-                  <span>上传参考图片（支持多图）</span>
-                </label>
-
-                {referenceImages.length > 0 ? (
-                  <>
-                    <DragDropContext
-                      onDragStart={handleReferenceDragStart}
-                      onDragUpdate={handleReferenceDragUpdate}
-                      onDragEnd={handleReferenceDragEnd}
-                    >
-                      <Droppable
-                        droppableId="reference-images"
-                        direction="horizontal"
-                        ignoreContainerClipping
-                        renderClone={(provided, snapshot, rubric) => {
-                          const cloneImage = referenceImages[rubric.source.index];
-
-                          if (!cloneImage) {
-                            return null;
-                          }
-
-                          return (
-                            <div
-                              ref={provided.innerRef}
-                              className="reference-item reference-item-clone"
-                              style={provided.draggableProps.style}
-                              {...provided.draggableProps}
-                              {...provided.dragHandleProps}
-                            >
-                              <ReferenceCard
-                                image={cloneImage}
-                                index={rubric.source.index}
-                                onRemove={handleRemoveReferenceImage}
-                                isDragging
-                              />
-                            </div>
-                          );
-                        }}
-                      >
-                        {(provided) => (
-                          <div
-                            ref={(node) => {
-                              provided.innerRef(node);
-                              referenceGridRef.current = node;
-                            }}
-                            className={`reference-grid${referenceDragActive ? " is-dragging" : ""}`}
-                            {...provided.droppableProps}
-                          >
-                            {referenceImages.map((image, index) => (
-                              <Draggable
-                                key={image.id}
-                                draggableId={image.id}
-                                index={index}
-                                disableInteractiveElementBlocking
-                              >
-                                {(draggableProvided, snapshot) => (
-                                  <div
-                                    ref={draggableProvided.innerRef}
-                                    data-reference-id={image.id}
-                                    className={`reference-item${snapshot.isDragging ? " is-dragging" : ""}`}
-                                    style={draggableProvided.draggableProps.style}
-                                    {...draggableProvided.draggableProps}
-                                    {...draggableProvided.dragHandleProps}
-                                  >
-                                    <ReferenceCard
-                                      image={image}
-                                      index={index}
-                                      onRemove={handleRemoveReferenceImage}
-                                      isDragging={snapshot.isDragging}
-                                    />
-                                  </div>
-                                )}
-                              </Draggable>
-                            ))}
-                            {provided.placeholder}
-                          </div>
-                        )}
-                      </Droppable>
-                    </DragDropContext>
-                  </>
-                ) : null}
-
                 <label className="field-label field-label-inline" htmlFor="bananaModelSelector">
                   <span>底模选择</span>
                   {selectedModel ? (
@@ -2868,8 +4096,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                   id="bananaModelSelector"
                   name="bananaModelSelector"
                   className="model-selector"
-                  value={selectedModelId}
-                  onChange={(event) => setSelectedModelId(event.target.value)}
+                  value={professionalSelectedModelId}
+                  onChange={(event) => setProfessionalSelectedModelId(event.target.value)}
                 >
                   {models.map((model) => (
                     <option key={model.id} value={model.id}>
@@ -2880,16 +4108,16 @@ function BananaStudioApp({ routeMode = "login" }) {
 
                 <div className="layout-config-card">
                   <div className="layout-control-row">
-                    <label className="image-option-field layout-select-field" htmlFor="aspectRatioSelector">
-                      <span className="field-label">图片比例</span>
+                    <label className="image-option-field layout-select-field" htmlFor="canvasSizeSelector">
+                      <span className="field-label">画板尺寸</span>
                       <select
-                        id="aspectRatioSelector"
-                        name="aspectRatioSelector"
+                        id="canvasSizeSelector"
+                        name="canvasSizeSelector"
                         className="model-selector compact-selector"
-                        value={selectedAspectRatio}
-                        onChange={(event) => setSelectedAspectRatio(event.target.value)}
+                        value={professionalCanvasSize}
+                        onChange={(event) => setProfessionalCanvasSize(event.target.value)}
                       >
-                        {availableAspectRatioOptions.map((option) => (
+                        {CANVAS_SIZE_SELECT_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>
@@ -2897,39 +4125,28 @@ function BananaStudioApp({ routeMode = "login" }) {
                       </select>
                     </label>
 
-                    <label className="image-option-field image-size-field" htmlFor="imageSizeSelector">
-                      <span className="field-label">分辨率</span>
-                      <select
-                        id="imageSizeSelector"
-                        name="imageSizeSelector"
-                        className="model-selector compact-selector"
-                        value={selectedImageSize}
-                        onChange={(event) => setSelectedImageSize(event.target.value)}
-                      >
-                        {availableImageSizeOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="image-option-field image-count-field" htmlFor="imageCountSelector">
-                      <span className="field-label">生成张数</span>
-                      <select
-                        id="imageCountSelector"
-                        name="imageCountSelector"
-                        className="model-selector compact-selector"
-                        value={selectedImageCount}
-                        onChange={(event) => setSelectedImageCount(normalizeImageCountValue(event.target.value))}
-                      >
-                        {IMAGE_COUNT_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    {isSimplePanelMode ? (
+                      <label className="image-option-field image-count-field" htmlFor="imageCountSelector">
+                        <span className="field-label">生成张数</span>
+                        <select
+                          id="imageCountSelector"
+                          name="imageCountSelector"
+                          className="model-selector compact-selector"
+                          value={professionalSelectedImageCount}
+                          onChange={(event) =>
+                            setProfessionalSelectedImageCount(
+                              normalizeImageCountValue(event.target.value),
+                            )
+                          }
+                        >
+                          {IMAGE_COUNT_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
 
                     <label className="image-option-field layout-track-field" htmlFor="layoutRows">
                       <span className="field-label">行数</span>
@@ -2937,8 +4154,10 @@ function BananaStudioApp({ routeMode = "login" }) {
                         id="layoutRows"
                         name="layoutRows"
                         className="model-selector compact-selector"
-                        value={layoutRows}
-                        onChange={(event) => setLayoutRows(clampLayoutTrack(event.target.value))}
+                        value={professionalLayoutRows}
+                        onChange={(event) =>
+                          setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
+                        }
                       >
                         {LAYOUT_TRACK_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
@@ -2954,8 +4173,10 @@ function BananaStudioApp({ routeMode = "login" }) {
                         id="layoutColumns"
                         name="layoutColumns"
                         className="model-selector compact-selector"
-                        value={layoutColumns}
-                        onChange={(event) => setLayoutColumns(clampLayoutTrack(event.target.value))}
+                        value={professionalLayoutColumns}
+                        onChange={(event) =>
+                          setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
+                        }
                       >
                         {LAYOUT_TRACK_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
@@ -2966,13 +4187,238 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </label>
                   </div>
 
+                  {professionalCanvasSize === CUSTOM_CANVAS_SIZE_VALUE ? (
+                    <div className="canvas-custom-size-row">
+                      <label className="image-option-field canvas-custom-size-field" htmlFor="customCanvasWidth">
+                        <span className="field-label">宽度 px</span>
+                        <input
+                          id="customCanvasWidth"
+                          name="customCanvasWidth"
+                          type="number"
+                          min="64"
+                          max="10000"
+                          step="1"
+                          inputMode="numeric"
+                          value={professionalCustomCanvasWidth}
+                          onChange={(event) =>
+                            setProfessionalCustomCanvasWidth(
+                              normalizeCanvasDimensionValue(
+                                event.target.value,
+                                professionalCustomCanvasWidth,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
+
+                      <label className="image-option-field canvas-custom-size-field" htmlFor="customCanvasHeight">
+                        <span className="field-label">高度 px</span>
+                        <input
+                          id="customCanvasHeight"
+                          name="customCanvasHeight"
+                          type="number"
+                          min="64"
+                          max="10000"
+                          step="1"
+                          inputMode="numeric"
+                          value={professionalCustomCanvasHeight}
+                          onChange={(event) =>
+                            setProfessionalCustomCanvasHeight(
+                              normalizeCanvasDimensionValue(
+                                event.target.value,
+                                professionalCustomCanvasHeight,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+
+                  <div className="professional-storyboard-global-panel">
+                    <label className="field-label" htmlFor="professionalGlobalPrompt">
+                      整体提示词
+                    </label>
+                    <textarea
+                      id="professionalGlobalPrompt"
+                      name="professionalGlobalPrompt"
+                      rows={4}
+                      value={professionalGlobalPrompt}
+                      onChange={(event) => setProfessionalGlobalPrompt(event.target.value)}
+                      placeholder="补充所有分镜共享的人物设定、画风、服装一致性、镜头语言和整体氛围"
+                    />
+
+                    <div className="professional-style-reference-panel">
+                      <div className="section-title-inline">
+                        <strong>整体画风参考图</strong>
+                        <span>上传 1 张图片，作为所有分镜图片的统一画风参考。</span>
+                      </div>
+
+                      {professionalStyleReference ? (
+                        <div className="professional-style-reference-card">
+                          <div className="professional-style-reference-media">
+                            <img
+                              src={professionalStyleReference.previewUrl}
+                              alt={professionalStyleReference.name}
+                              draggable="false"
+                            />
+                          </div>
+                          <div className="professional-style-reference-copy">
+                            <strong title={professionalStyleReference.name}>
+                              {professionalStyleReference.name}
+                            </strong>
+                            <span>这张图会自动附加到每个格子的生图请求里。</span>
+                          </div>
+                          <div className="professional-style-reference-actions">
+                            <label className="ghost-button professional-style-reference-action">
+                              更换图片
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={handleFileChange}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => handleRemoveReferenceImage(professionalStyleReference.id)}
+                            >
+                              移除图片
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <label
+                          className={`upload-box professional-style-upload${uploadDragActive ? " is-drag-active" : ""}`}
+                          onDragOver={handleUploadDragOver}
+                          onDragLeave={handleUploadDragLeave}
+                          onDrop={handleUploadDrop}
+                        >
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={handleFileChange}
+                          />
+                          <span>上传整体画风参考图</span>
+                          <small>支持点击选择或拖入图片，最多 1 张。</small>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="layout-preview-toolbar">
+                    <div className="section-title-inline">
+                      <strong>分镜表格</strong>
+                      <span>刷新后会自动恢复已填写内容和已生成图片。</span>
+                    </div>
+                    <div className="layout-preview-controls" aria-label="分镜表格全局配文样式">
+                      <label
+                        className="image-option-field compact-range-field"
+                        htmlFor="storyboardCaptionFontSize"
+                      >
+                        <span className="field-label">
+                          配文字号
+                          <strong>{professionalStoryboardCaptionFontSizePercent}%</strong>
+                        </span>
+                        <input
+                          id="storyboardCaptionFontSize"
+                          name="storyboardCaptionFontSize"
+                          type="range"
+                          min={MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                          max={MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                          step="5"
+                          value={professionalStoryboardCaptionFontSizePercent}
+                          onChange={(event) =>
+                            setProfessionalStoryboardCaptionFontSizePercent(
+                              normalizeStoryboardCaptionFontSizePercent(event.target.value),
+                            )
+                          }
+                        />
+                      </label>
+
+                      <label
+                        className="image-option-field compact-range-field"
+                        htmlFor="storyboardCaptionBackgroundAlpha"
+                      >
+                        <span className="field-label">
+                          配文底色
+                          <strong>{professionalStoryboardCaptionBackgroundAlphaPercent}%</strong>
+                        </span>
+                        <input
+                          id="storyboardCaptionBackgroundAlpha"
+                          name="storyboardCaptionBackgroundAlpha"
+                          type="range"
+                          min={MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT}
+                          max={MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT}
+                          step="4"
+                          value={professionalStoryboardCaptionBackgroundAlphaPercent}
+                          onChange={(event) =>
+                            setProfessionalStoryboardCaptionBackgroundAlphaPercent(
+                              normalizeStoryboardCaptionBackgroundAlphaPercent(
+                                event.target.value,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost-button storyboard-clear-button"
+                      onClick={openStoryboardClearConfirm}
+                      disabled={!storyboardHasContent || storyboardHasLoadingCells}
+                    >
+                      清空表格
+                    </button>
+                  </div>
+
                   <div className="layout-preview-shell">
-                    <div className="layout-preview-square">
-                      <canvas
-                        ref={handleLayoutCanvasMount}
-                        className="layout-preview-canvas"
-                        aria-label="布局预览"
-                      />
+                    <div className="layout-preview-square" style={storyboardShellStyle}>
+                      <div
+                        className="storyboard-grid"
+                        style={storyboardGridStyle}
+                        role="grid"
+                        aria-label="专业模式分镜表格"
+                      >
+                        {storyboardCellList.map((cell) => (
+                          <button
+                            key={cell.id}
+                            type="button"
+                            role="gridcell"
+                            className={`storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
+                            onClick={() => openStoryboardEditor(cell.id)}
+                            disabled={cell.status === "loading"}
+                            aria-label={`${cell.label}${cell.status === "loading" ? "，生成中" : ""}`}
+                          >
+                            {cell.record ? (
+                              <img
+                                className="storyboard-cell-image"
+                                src={cell.record.previewUrl}
+                                alt={`${cell.label} 生成结果`}
+                                draggable="false"
+                              />
+                            ) : null}
+                            <span className="storyboard-cell-index">{cell.index}</span>
+                            <span className="storyboard-cell-prompt">
+                              {formatStoryboardPromptPreview(cell.prompt)}
+                            </span>
+                            <span className="storyboard-cell-status">
+                              {cell.status === "loading"
+                                ? "生成中"
+                                : cell.record
+                                  ? "已生成"
+                                  : "待填写"}
+                            </span>
+                            {normalizeTextValue(cell.caption) ? (
+                              <span className="storyboard-cell-caption">
+                                <span className="storyboard-cell-caption-text">
+                                  {normalizeTextValue(cell.caption)}
+                                </span>
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -2981,7 +4427,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
             {studioError ? <p className="error-text">{studioError}</p> : null}
 
-            {promptMode !== "focus" ? (
+            {showSimplePanelSubmit ? (
               <>
                 <button
                   type="submit"
@@ -2990,14 +4436,260 @@ function BananaStudioApp({ routeMode = "login" }) {
                 >
                   {studioPending ? "banana 正在生图..." : "开始生成"}
                 </button>
-                {isProfessionalPanelMode && remainingQuota !== null ? (
-                  <p className="quota-hint">剩余{remainingQuota}张额度</p>
-                ) : null}
               </>
+            ) : null}
+            {showProfessionalPanelControls && remainingQuota !== null ? (
+              <p className="quota-hint">剩余{remainingQuota}张额度</p>
             ) : null}
           </form>
         </section>
       </main>
+      {storyboardEditorOpen && storyboardEditorCell ? (
+        <div
+          className="storyboard-editor-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${storyboardEditorCell.label} 输入面板`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeStoryboardEditor();
+            }
+          }}
+        >
+          <section className="storyboard-editor-panel">
+            <div className="storyboard-editor-windowbar">
+              <span className="finder-window-spacer" aria-hidden="true" />
+              <strong>
+                {storyboardEditorCell.label} · 行 {storyboardEditorCell.row} / 列 {storyboardEditorCell.column}
+              </strong>
+              <button
+                type="button"
+                className="finder-close-button"
+                onClick={closeStoryboardEditor}
+                aria-label="关闭输入面板"
+                title="关闭"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 5l10 10" />
+                  <path d="M15 5L5 15" />
+                </svg>
+              </button>
+            </div>
+
+            <div className={`storyboard-editor-layout${storyboardEditorCell.record ? " has-preview" : ""}`}>
+              <div className="storyboard-editor-form">
+                <label className="field-label" htmlFor="storyboardCellPrompt">
+                  这个格子的提示词
+                </label>
+                <label className="image-option-field" htmlFor="storyboardCellAspectRatio">
+                  <span className="field-label">图片比例</span>
+                  <select
+                    id="storyboardCellAspectRatio"
+                    name="storyboardCellAspectRatio"
+                    className="model-selector compact-selector"
+                    value={storyboardEditorCell.aspectRatio || professionalDefaultCellAspectRatio}
+                    onChange={(event) => handleStoryboardAspectRatioChange(event.target.value)}
+                  >
+                    {availableAspectRatioOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="image-option-field" htmlFor="storyboardCellImageSize">
+                  <span className="field-label">分辨率</span>
+                  <select
+                    id="storyboardCellImageSize"
+                    name="storyboardCellImageSize"
+                    className="model-selector compact-selector"
+                    value={storyboardEditorCell.imageSize || professionalDefaultCellImageSize}
+                    onChange={(event) => handleStoryboardImageSizeChange(event.target.value)}
+                  >
+                    {availableImageSizeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <textarea
+                  id="storyboardCellPrompt"
+                  name="storyboardCellPrompt"
+                  rows={8}
+                  value={storyboardEditorCell.prompt}
+                  onChange={(event) => handleStoryboardPromptChange(event.target.value)}
+                  placeholder="描述这个格子的主体、镜头、动作、光线、材质和氛围"
+                />
+                <div className="storyboard-reference-panel">
+                  <div className="storyboard-reference-panel-header">
+                    <div className="section-title-inline">
+                      <strong>当前格子的参考图</strong>
+                      <span>只影响这个格子，生成时会继续叠加整体画风参考图。</span>
+                    </div>
+                    {professionalStyleReference ? (
+                      <span className="storyboard-reference-parent-hint">
+                        已继承整体画风参考图
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {storyboardEditorCell.referenceImages?.[0] ? (
+                    <div className="professional-style-reference-card storyboard-reference-card">
+                      <div className="professional-style-reference-media storyboard-reference-media">
+                        <img
+                          src={storyboardEditorCell.referenceImages[0].previewUrl}
+                          alt={storyboardEditorCell.referenceImages[0].name}
+                          draggable="false"
+                        />
+                      </div>
+                      <div className="professional-style-reference-copy">
+                        <strong title={storyboardEditorCell.referenceImages[0].name}>
+                          {storyboardEditorCell.referenceImages[0].name}
+                        </strong>
+                        <span>这张图会作为当前格子的额外参考，不会影响其它格子。</span>
+                      </div>
+                      <div className="professional-style-reference-actions">
+                        <label className="ghost-button professional-style-reference-action">
+                          更换图片
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={handleStoryboardReferenceFileChange}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() =>
+                            handleRemoveStoryboardReferenceImage(
+                              storyboardEditorCell.referenceImages[0].id,
+                            )
+                          }
+                        >
+                          移除图片
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <label className="upload-box professional-style-upload storyboard-reference-upload">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleStoryboardReferenceFileChange}
+                      />
+                      <span>上传当前格子的参考图</span>
+                      <small>支持 1 张图片，只作用于这个格子。</small>
+                    </label>
+                  )}
+                </div>
+                <div className="storyboard-caption-field">
+                  <div className="storyboard-caption-field-header">
+                    <label className="field-label" htmlFor="storyboardCellCaption">
+                      配文
+                    </label>
+                    <span className="storyboard-caption-field-hint">
+                      支持回车换行，导出会保留排版
+                    </span>
+                  </div>
+                  <textarea
+                    ref={storyboardCaptionTextareaRef}
+                    id="storyboardCellCaption"
+                    name="storyboardCellCaption"
+                    className="storyboard-caption-textarea"
+                    rows={3}
+                    value={storyboardEditorCell.caption || ""}
+                    onChange={(event) => handleStoryboardCaptionChange(event.target.value)}
+                    placeholder={"输入要显示在格子底部的文案\n例如：LV2.玩手机\n打游戏，原神启动！！！"}
+                  />
+                </div>
+                {storyboardEditorCell.statusText ? (
+                  <p className="storyboard-editor-status">{storyboardEditorCell.statusText}</p>
+                ) : null}
+                {storyboardEditorCell.error ? (
+                  <p className="error-text">{storyboardEditorCell.error}</p>
+                ) : null}
+                <div className="storyboard-editor-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={handleStoryboardCellGenerate}
+                    disabled={storyboardEditorCell.status === "loading" || !generationModelId}
+                  >
+                    {storyboardEditorCell.status === "loading"
+                      ? "banana 正在生图..."
+                      : storyboardEditorCell.record
+                        ? "重新生成图片"
+                        : "生成图片"}
+                  </button>
+                </div>
+              </div>
+
+              {storyboardEditorCell.record ? (
+                <div className="storyboard-editor-preview-card">
+                  <button
+                    type="button"
+                    className="storyboard-editor-preview-button"
+                    onClick={() => openImagePreview(storyboardEditorCell.record)}
+                    aria-label="查看这个格子的生成图片"
+                  >
+                    <img
+                      src={storyboardEditorCell.record.previewUrl}
+                      alt={`${storyboardEditorCell.label} 生成结果`}
+                      draggable="false"
+                    />
+                  </button>
+                  <div className="storyboard-editor-preview-meta">
+                    <strong>已生成图片</strong>
+                    <span>
+                      {storyboardEditorCell.record.imageSize || storyboardEditorCell.imageSize || professionalDefaultCellImageSize}
+                      {storyboardEditorCell.record.aspectRatio
+                        ? ` · ${storyboardEditorCell.record.aspectRatio}`
+                        : storyboardEditorCell.aspectRatio
+                          ? ` · ${storyboardEditorCell.aspectRatio}`
+                          : ""}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {storyboardClearConfirmOpen ? (
+        <div
+          className="storyboard-confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="确认清空分镜表格"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeStoryboardClearConfirm();
+            }
+          }}
+        >
+          <section className="storyboard-confirm-panel">
+            <strong>确认清空表格？</strong>
+            <p>这个操作会清掉当前表格里的提示词和已生成图片，刷新后也无法恢复。</p>
+            <div className="storyboard-confirm-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={closeStoryboardClearConfirm}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button storyboard-confirm-danger"
+                onClick={handleClearStoryboard}
+              >
+                确认清空
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {resourceManagerOpen ? (
         <div
           className="resource-manager-overlay"
