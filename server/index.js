@@ -1726,6 +1726,16 @@ function normalizeStoryboardCaptionFontSizePercent(value) {
   return Math.min(Math.max(parsedValue, 70), 160);
 }
 
+function normalizeStoryboardDividerWidthPx(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return 2;
+  }
+
+  return Math.min(Math.max(parsedValue, 1), 8);
+}
+
 function normalizeStoryboardCaptionBackgroundAlphaPercent(value) {
   const parsedValue = Number.parseInt(String(value ?? ""), 10);
 
@@ -1774,6 +1784,9 @@ function sanitizeProfessionalExportPayload(input) {
     });
   }
 
+  const dividerStyle = {
+    widthPx: normalizeStoryboardDividerWidthPx(input?.dividerStyle?.widthPx),
+  };
   const captionStyle = {
     fontSizePercent: normalizeStoryboardCaptionFontSizePercent(
       input?.captionStyle?.fontSizePercent,
@@ -1809,6 +1822,7 @@ function sanitizeProfessionalExportPayload(input) {
       rows,
       columns,
     },
+    dividerStyle,
     captionStyle,
     cells,
   };
@@ -1829,9 +1843,11 @@ function buildProfessionalExportFilename() {
 }
 
 function renderProfessionalExportHtml(payload) {
-  const { canvas, cells, captionStyle } = payload;
+  const { canvas, cells, dividerStyle, captionStyle } = payload;
   const gridTemplateColumns = `repeat(${canvas.columns}, minmax(0, 1fr))`;
   const gridTemplateRows = `repeat(${canvas.rows}, minmax(0, 1fr))`;
+  const dividerSize = normalizeStoryboardDividerWidthPx(dividerStyle?.widthPx);
+  const dividerColor = "rgba(255, 255, 255, 0.96)";
   const captionFontScale =
     normalizeStoryboardCaptionFontSizePercent(captionStyle?.fontSizePercent) / 100;
   const captionBackgroundAlpha =
@@ -1900,9 +1916,9 @@ function renderProfessionalExportHtml(payload) {
           display: grid;
           grid-template-columns: ${gridTemplateColumns};
           grid-template-rows: ${gridTemplateRows};
-          gap: 1px;
-          padding: 1px;
-          background: rgba(255, 255, 255, 0.98);
+          gap: ${dividerSize}px;
+          padding: ${dividerSize}px;
+          background: ${dividerColor};
           box-shadow: 0 24px 60px rgba(79, 54, 7, 0.12);
         }
         .professional-export-cell {
@@ -1944,9 +1960,9 @@ function renderProfessionalExportHtml(payload) {
         }
         .professional-export-cell-caption-text {
           display: inline;
-          padding: ${captionPaddingY}px ${captionPaddingX}px ${captionPaddingY + 1}px;
-          border-radius: ${captionRadius}px;
-          background: rgba(94, 94, 96, ${captionBackgroundAlpha});
+          padding: 0 ${Math.max(4, Math.round(captionPaddingX * 0.72))}px ${Math.max(1, Math.round(captionPaddingY * 0.32))}px;
+          border-radius: 0;
+          background: rgba(8, 8, 8, 0.75);
           box-decoration-break: clone;
           -webkit-box-decoration-break: clone;
           color: #ffffff;
@@ -1955,7 +1971,6 @@ function renderProfessionalExportHtml(payload) {
           line-height: 1.24;
           font-weight: 800;
           letter-spacing: -0.03em;
-          text-shadow: 0 1px 1px rgba(0, 0, 0, 0.22);
           word-break: break-word;
           white-space: pre-wrap;
         }

@@ -20,6 +20,9 @@ const PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY = "banana.professional.custom
 const PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY = "banana.professional.customCanvasHeight";
 const PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.professional.selectedLayoutRows";
 const PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY = "banana.professional.selectedLayoutColumns";
+const PROFESSIONAL_STORYBOARD_ASPECT_RATIO_STORAGE_KEY = "banana.professional.storyboardAspectRatio";
+const PROFESSIONAL_STORYBOARD_IMAGE_SIZE_STORAGE_KEY = "banana.professional.storyboardImageSize";
+const PROFESSIONAL_STORYBOARD_DIVIDER_WIDTH_STORAGE_KEY = "banana.professional.storyboardDividerWidth";
 const PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY = "banana.professional.storyboardCaptionFontSize";
 const PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY = "banana.professional.storyboardCaptionBackgroundAlpha";
 const PROFESSIONAL_SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.professional.selectedImageSize";
@@ -44,9 +47,12 @@ const PROFESSIONAL_STYLE_REFERENCE_LIMIT = 1;
 const STORYBOARD_CELL_REFERENCE_LIMIT = 1;
 const DEFAULT_CUSTOM_CANVAS_WIDTH = 1080;
 const DEFAULT_CUSTOM_CANVAS_HEIGHT = 1440;
+const DEFAULT_STORYBOARD_DIVIDER_WIDTH_PX = 2;
+const MIN_STORYBOARD_DIVIDER_WIDTH_PX = 1;
+const MAX_STORYBOARD_DIVIDER_WIDTH_PX = 8;
 const DEFAULT_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 100;
 const MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 70;
-const MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 160;
+const MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 440;
 const DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 90;
 const MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 72;
 const MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 100;
@@ -172,6 +178,19 @@ function normalizeStoryboardCaptionFontSizePercent(value) {
   return Math.min(
     Math.max(parsedValue, MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT),
     MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT,
+  );
+}
+
+function normalizeStoryboardDividerWidthPx(value) {
+  const parsedValue = Number.parseInt(String(value ?? ""), 10);
+
+  if (!Number.isFinite(parsedValue)) {
+    return DEFAULT_STORYBOARD_DIVIDER_WIDTH_PX;
+  }
+
+  return Math.min(
+    Math.max(parsedValue, MIN_STORYBOARD_DIVIDER_WIDTH_PX),
+    MAX_STORYBOARD_DIVIDER_WIDTH_PX,
   );
 }
 
@@ -336,18 +355,12 @@ function buildStoryboardCellDefinitions(rows, columns) {
   });
 }
 
-function createStoryboardCellState(
-  definition,
-  defaultAspectRatio = "1:1",
-  defaultImageSize = "1K",
-) {
+function createStoryboardCellState(definition) {
   return {
     ...definition,
     prompt: "",
     caption: "",
     referenceImages: [],
-    aspectRatio: defaultAspectRatio,
-    imageSize: normalizeImageSizeValue(defaultImageSize),
     status: "idle",
     statusText: "",
     error: "",
@@ -355,32 +368,10 @@ function createStoryboardCellState(
   };
 }
 
-function normalizeStoryboardCells(
-  currentCells,
-  rows,
-  columns,
-  defaultAspectRatio = "1:1",
-  allowedAspectRatioValues = null,
-  defaultImageSize = "1K",
-  allowedImageSizeValues = null,
-) {
+function normalizeStoryboardCells(currentCells, rows, columns) {
   return Object.fromEntries(
     buildStoryboardCellDefinitions(rows, columns).map((definition) => {
       const currentCell = currentCells?.[definition.id];
-      const normalizedAspectRatio = normalizeAspectRatioValue(
-        currentCell?.aspectRatio || defaultAspectRatio,
-      );
-      const normalizedImageSize = normalizeImageSizeValue(
-        currentCell?.imageSize || defaultImageSize,
-      );
-      const nextAspectRatio =
-        allowedAspectRatioValues && !allowedAspectRatioValues.has(normalizedAspectRatio)
-          ? defaultAspectRatio
-          : normalizedAspectRatio;
-      const nextImageSize =
-        allowedImageSizeValues && !allowedImageSizeValues.has(normalizedImageSize)
-          ? defaultImageSize
-          : normalizedImageSize;
 
       return [
         definition.id,
@@ -395,10 +386,8 @@ function normalizeStoryboardCells(
                     .filter(Boolean)
                     .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
                 : [],
-              aspectRatio: nextAspectRatio,
-              imageSize: nextImageSize,
             }
-          : createStoryboardCellState(definition, defaultAspectRatio, defaultImageSize),
+          : createStoryboardCellState(definition),
       ];
     }),
   );
@@ -449,11 +438,13 @@ function formatCanvasSizeAspectRatioValue(canvasSizeOption) {
 function buildProfessionalExportCssVariables(
   metrics,
   {
+    dividerWidthPx = DEFAULT_STORYBOARD_DIVIDER_WIDTH_PX,
     captionFontScale = 1,
     captionBackgroundAlpha = DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT / 100,
   } = {},
 ) {
   return {
+    "--professional-export-divider-size": `${dividerWidthPx}px`,
     "--professional-export-placeholder-padding": `${metrics.placeholderPadding}px`,
     "--professional-export-placeholder-font-size": `${metrics.placeholderFontSize}px`,
     "--professional-export-caption-inset": `${metrics.captionInset}px`,
@@ -1235,6 +1226,7 @@ function buildProfessionalExportPayload({
   columns,
   cells,
   title = "",
+  dividerStyle = {},
   captionStyle = {},
 }) {
   return {
@@ -1245,6 +1237,9 @@ function buildProfessionalExportPayload({
       height: Number(canvasSizeOption?.height) || 1,
       rows,
       columns,
+    },
+    dividerStyle: {
+      widthPx: normalizeStoryboardDividerWidthPx(dividerStyle.widthPx),
     },
     captionStyle: {
       fontSizePercent: normalizeStoryboardCaptionFontSizePercent(captionStyle.fontSizePercent),
@@ -1326,6 +1321,44 @@ function restorePersistedGenerationResultRecord(record) {
   };
 }
 
+function cloneGenerationResultRecord(record) {
+  return restorePersistedGenerationResultRecord(buildPersistedGenerationResultRecord(record));
+}
+
+async function copyTextToClipboard(text) {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === "undefined") {
+    throw new Error("当前环境不支持复制");
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    const didCopy = document.execCommand("copy");
+
+    if (!didCopy) {
+      throw new Error("复制失败");
+    }
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 function getGeneratedResponseImages(data) {
   if (Array.isArray(data?.images) && data.images.length > 0) {
     return data.images
@@ -1405,8 +1438,6 @@ function buildPersistedStoryboardCells(cells) {
               .filter(Boolean)
               .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
           : [],
-        aspectRatio: normalizeAspectRatioValue(cell?.aspectRatio),
-        imageSize: normalizeImageSizeValue(cell?.imageSize),
         record: buildPersistedGenerationResultRecord(cell?.record),
       },
     ]),
@@ -1454,8 +1485,6 @@ function restorePersistedStoryboardCells(cells) {
                 .filter(Boolean)
                 .slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
             : [],
-          aspectRatio: normalizeAspectRatioValue(cell?.aspectRatio),
-          imageSize: normalizeImageSizeValue(cell?.imageSize),
           status: restoredRecord ? "success" : "idle",
           statusText: "",
           error: "",
@@ -1670,6 +1699,19 @@ function BananaStudioApp({ routeMode = "login" }) {
         1,
     ),
   );
+  const [professionalStoryboardAspectRatio, setProfessionalStoryboardAspectRatio] = useState(() =>
+    normalizeAspectRatioValue(
+      readLocalValue(PROFESSIONAL_STORYBOARD_ASPECT_RATIO_STORAGE_KEY) ||
+        PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
+    ),
+  );
+  const [professionalStoryboardImageSize, setProfessionalStoryboardImageSize] = useState(() =>
+    normalizeImageSizeValue(
+      readLocalValue(PROFESSIONAL_STORYBOARD_IMAGE_SIZE_STORAGE_KEY) ||
+        readLocalValue(PROFESSIONAL_SELECTED_IMAGE_SIZE_STORAGE_KEY) ||
+        "1K",
+    ),
+  );
   const [professionalSelectedImageCount, setProfessionalSelectedImageCount] = useState(() =>
     normalizeImageCountValue(
       readLocalValue(PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY) ||
@@ -1731,6 +1773,11 @@ function BananaStudioApp({ routeMode = "login" }) {
       DEFAULT_CUSTOM_CANVAS_HEIGHT,
     ),
   );
+  const [professionalStoryboardDividerWidthPx, setProfessionalStoryboardDividerWidthPx] = useState(() =>
+    normalizeStoryboardDividerWidthPx(
+      readLocalValue(PROFESSIONAL_STORYBOARD_DIVIDER_WIDTH_STORAGE_KEY),
+    ),
+  );
   const [professionalStoryboardCaptionFontSizePercent, setProfessionalStoryboardCaptionFontSizePercent] = useState(() =>
     normalizeStoryboardCaptionFontSizePercent(
       readLocalValue(PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY),
@@ -1742,23 +1789,21 @@ function BananaStudioApp({ routeMode = "login" }) {
     ),
   );
   const [storyboardCells, setStoryboardCells] = useState(() =>
-    normalizeStoryboardCells(
-      {},
-      professionalLayoutRows,
-      professionalLayoutColumns,
-      PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
-      null,
-      "1K",
-    ),
+    normalizeStoryboardCells({}, professionalLayoutRows, professionalLayoutColumns),
   );
   const [storyboardEditorCellId, setStoryboardEditorCellId] = useState("");
+  const [storyboardLibraryPickerOpen, setStoryboardLibraryPickerOpen] = useState(false);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
+  const [storyboardShareCopyState, setStoryboardShareCopyState] = useState("idle");
+  const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
+  const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
   const [storyboardCellsHydrated, setStoryboardCellsHydrated] = useState(false);
   const [professionalExportScale, setProfessionalExportScale] = useState(1);
   const [professionalExportCardElement, setProfessionalExportCardElement] = useState(null);
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const storyboardCaptionTextareaRef = useRef(null);
+  const storyboardShareCopyResetTimeoutRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
   const imagePreviewPointersRef = useRef(new Map());
@@ -1802,10 +1847,12 @@ function BananaStudioApp({ routeMode = "login" }) {
     () => ({
       gridTemplateColumns: `repeat(${Math.max(professionalLayoutColumns, 1)}, minmax(0, 1fr))`,
       gridTemplateRows: `repeat(${Math.max(professionalLayoutRows, 1)}, minmax(0, 1fr))`,
+      "--storyboard-divider-size": `${professionalStoryboardDividerWidthPx}px`,
       "--storyboard-caption-font-scale": String(storyboardCaptionFontScale),
       "--storyboard-caption-background-alpha": String(storyboardCaptionBackgroundAlpha),
     }),
     [
+      professionalStoryboardDividerWidthPx,
       professionalLayoutColumns,
       professionalLayoutRows,
       storyboardCaptionBackgroundAlpha,
@@ -1835,12 +1882,25 @@ function BananaStudioApp({ routeMode = "login" }) {
     }),
     [professionalCanvasSizeOption, professionalExportScale],
   );
+  const professionalExportGridStyle = useMemo(
+    () => ({
+      gridTemplateColumns: `repeat(${Math.max(professionalLayoutColumns, 1)}, minmax(0, 1fr))`,
+      gridTemplateRows: `repeat(${Math.max(professionalLayoutRows, 1)}, minmax(0, 1fr))`,
+      "--professional-export-divider-size": `${professionalStoryboardDividerWidthPx}px`,
+    }),
+    [
+      professionalLayoutColumns,
+      professionalLayoutRows,
+      professionalStoryboardDividerWidthPx,
+    ],
+  );
   const professionalExportSheetStyle = useMemo(
     () => ({
       width: `${professionalCanvasSizeOption.width}px`,
       height: `${professionalCanvasSizeOption.height}px`,
       transform: `scale(${professionalExportScale})`,
       ...buildProfessionalExportCssVariables(professionalExportMetrics, {
+        dividerWidthPx: professionalStoryboardDividerWidthPx,
         captionFontScale: storyboardCaptionFontScale,
         captionBackgroundAlpha: storyboardCaptionBackgroundAlpha,
       }),
@@ -1849,6 +1909,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       professionalCanvasSizeOption,
       professionalExportMetrics,
       professionalExportScale,
+      professionalStoryboardDividerWidthPx,
       storyboardCaptionBackgroundAlpha,
       storyboardCaptionFontScale,
     ],
@@ -1967,9 +2028,6 @@ function BananaStudioApp({ routeMode = "login" }) {
             persistedStoryboardCells,
             professionalLayoutRows,
             professionalLayoutColumns,
-            PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO,
-            null,
-            "1K",
           ),
         );
       } catch (error) {
@@ -2183,29 +2241,105 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     return availableImageSizeOptions[0]?.value || "1K";
   }, [availableImageSizeOptions]);
+  const professionalStoryboardAspectRatioValue = useMemo(() => {
+    if (availableAspectRatioValueSet.has(professionalStoryboardAspectRatio)) {
+      return professionalStoryboardAspectRatio;
+    }
+
+    return professionalDefaultCellAspectRatio;
+  }, [
+    availableAspectRatioValueSet,
+    professionalDefaultCellAspectRatio,
+    professionalStoryboardAspectRatio,
+  ]);
+  const professionalStoryboardImageSizeValue = useMemo(() => {
+    if (availableImageSizeValueSet.has(professionalStoryboardImageSize)) {
+      return professionalStoryboardImageSize;
+    }
+
+    return professionalDefaultCellImageSize;
+  }, [
+    availableImageSizeValueSet,
+    professionalDefaultCellImageSize,
+    professionalStoryboardImageSize,
+  ]);
   const storyboardCellList = useMemo(
     () =>
       storyboardCellDefinitions.map(
-        (definition) =>
-          storyboardCells[definition.id] ||
-          createStoryboardCellState(
-            definition,
-            professionalDefaultCellAspectRatio,
-            professionalDefaultCellImageSize,
-          ),
+        (definition) => storyboardCells[definition.id] || createStoryboardCellState(definition),
       ),
     [
-      professionalDefaultCellAspectRatio,
-      professionalDefaultCellImageSize,
       storyboardCellDefinitions,
       storyboardCells,
     ],
   );
+  const storyboardEditorCellIndex = useMemo(
+    () => storyboardCellList.findIndex((cell) => cell.id === storyboardEditorCellId),
+    [storyboardCellList, storyboardEditorCellId],
+  );
+  const previousStoryboardEditorCell =
+    storyboardEditorCellIndex > 0 ? storyboardCellList[storyboardEditorCellIndex - 1] : null;
+  const nextStoryboardEditorCell =
+    storyboardEditorCellIndex >= 0 && storyboardEditorCellIndex < storyboardCellList.length - 1
+      ? storyboardCellList[storyboardEditorCellIndex + 1]
+      : null;
   const storyboardHasContent = useMemo(
     () =>
       storyboardCellList.some((cell) => normalizeTextValue(cell.prompt) || cell.record),
     [storyboardCellList],
   );
+  const storyboardShareText = useMemo(() => {
+    const shareSections = [
+      "专业模式分享",
+      "",
+      "参数",
+      `底模：${selectedModel?.name || professionalSelectedModelId || "未选择"}`,
+      `画板尺寸：${professionalCanvasSizeOption.label}`,
+      `分镜布局：${professionalLayoutRows} 行 × ${professionalLayoutColumns} 列`,
+      `图片比例：${professionalStoryboardAspectRatioValue}`,
+      `分辨率：${professionalStoryboardImageSizeValue}`,
+      `分割线：${professionalStoryboardDividerWidthPx}px`,
+      `配文字号：${professionalStoryboardCaptionFontSizePercent}%`,
+      `整体画风参考图：${professionalStyleReference?.name || "未设置"}`,
+      "",
+      "整体提示词",
+      normalizeTextValue(professionalGlobalPrompt) || "未填写",
+      "",
+      "分镜提示词",
+    ];
+    const cellSections = storyboardCellList
+      .map((cell) => {
+        const prompt = normalizeTextValue(cell.prompt);
+
+        if (!prompt) {
+          return "";
+        }
+
+        return [
+          `${cell.label}｜行 ${cell.row} / 列 ${cell.column}`,
+          `提示词：${prompt}`,
+          `格子参考图：${cell.referenceImages?.[0]?.name || "未设置"}`,
+        ].join("\n");
+      })
+      .filter(Boolean);
+
+    return [...shareSections, ...(cellSections.length > 0 ? cellSections : ["未填写任何格子提示词"])]
+      .join("\n\n")
+      .trim();
+  }, [
+    professionalCanvasSizeOption.label,
+    professionalGlobalPrompt,
+    professionalLayoutColumns,
+    professionalLayoutRows,
+    professionalSelectedModelId,
+    professionalStoryboardAspectRatioValue,
+    professionalStoryboardCaptionFontSizePercent,
+    professionalStoryboardDividerWidthPx,
+    professionalStoryboardImageSizeValue,
+    professionalStyleReference?.name,
+    selectedModel?.name,
+    storyboardCellList,
+  ]);
   const storyboardHasLoadingCells = useMemo(
     () => storyboardCellList.some((cell) => cell.status === "loading"),
     [storyboardCellList],
@@ -2239,8 +2373,10 @@ function BananaStudioApp({ routeMode = "login" }) {
   const generationModelId = isSimplePanelMode ? simplePanelModelId : professionalSelectedModelId;
   const generationAspectRatio = isSimplePanelMode
     ? simplePanelAspectRatio
-    : professionalDefaultCellAspectRatio;
-  const generationImageSize = isSimplePanelMode ? simplePanelImageSize : professionalDefaultCellImageSize;
+    : professionalStoryboardAspectRatioValue;
+  const generationImageSize = isSimplePanelMode
+    ? simplePanelImageSize
+    : professionalStoryboardImageSizeValue;
   const generationImageCount = isSimplePanelMode
     ? SIMPLE_PANEL_DEFAULTS.imageCount
     : professionalSelectedImageCount;
@@ -2356,6 +2492,45 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [professionalLayoutColumns]);
 
   useEffect(() => {
+    if (!availableAspectRatioValueSet.has(professionalStoryboardAspectRatio)) {
+      setProfessionalStoryboardAspectRatio(professionalDefaultCellAspectRatio);
+      return;
+    }
+
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_ASPECT_RATIO_STORAGE_KEY,
+      professionalStoryboardAspectRatio,
+    );
+  }, [
+    availableAspectRatioValueSet,
+    professionalDefaultCellAspectRatio,
+    professionalStoryboardAspectRatio,
+  ]);
+
+  useEffect(() => {
+    if (!availableImageSizeValueSet.has(professionalStoryboardImageSize)) {
+      setProfessionalStoryboardImageSize(professionalDefaultCellImageSize);
+      return;
+    }
+
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_IMAGE_SIZE_STORAGE_KEY,
+      professionalStoryboardImageSize,
+    );
+  }, [
+    availableImageSizeValueSet,
+    professionalDefaultCellImageSize,
+    professionalStoryboardImageSize,
+  ]);
+
+  useEffect(() => {
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_DIVIDER_WIDTH_STORAGE_KEY,
+      String(normalizeStoryboardDividerWidthPx(professionalStoryboardDividerWidthPx)),
+    );
+  }, [professionalStoryboardDividerWidthPx]);
+
+  useEffect(() => {
     writeLocalValue(
       PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY,
       String(
@@ -2395,21 +2570,9 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   useEffect(() => {
     setStoryboardCells((currentValue) =>
-      normalizeStoryboardCells(
-        currentValue,
-        professionalLayoutRows,
-        professionalLayoutColumns,
-        professionalDefaultCellAspectRatio,
-        availableAspectRatioValueSet,
-        professionalDefaultCellImageSize,
-        availableImageSizeValueSet,
-      ),
+      normalizeStoryboardCells(currentValue, professionalLayoutRows, professionalLayoutColumns),
     );
   }, [
-    availableAspectRatioValueSet,
-    availableImageSizeValueSet,
-    professionalDefaultCellAspectRatio,
-    professionalDefaultCellImageSize,
     professionalLayoutColumns,
     professionalLayoutRows,
   ]);
@@ -2457,6 +2620,18 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setStoryboardEditorCellId("");
   }, [storyboardCells, storyboardEditorCellId]);
+
+  useEffect(() => {
+    setStoryboardLibraryPickerOpen(false);
+  }, [storyboardEditorCellId]);
+
+  useEffect(() => {
+    return () => {
+      if (storyboardShareCopyResetTimeoutRef.current) {
+        window.clearTimeout(storyboardShareCopyResetTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasLayoutValues) {
@@ -2789,6 +2964,9 @@ function BananaStudioApp({ routeMode = "login" }) {
           columns: professionalLayoutColumns,
           cells: storyboardCellList,
           title: professionalGlobalPrompt || "专业模式导出预览",
+          dividerStyle: {
+            widthPx: professionalStoryboardDividerWidthPx,
+          },
           captionStyle: {
             fontSizePercent: professionalStoryboardCaptionFontSizePercent,
             backgroundAlphaPercent: professionalStoryboardCaptionBackgroundAlphaPercent,
@@ -3123,7 +3301,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   function openStoryboardEditor(cellId) {
     const cell = storyboardCells[cellId];
 
-    if (!cell || cell.status === "loading") {
+    if (!cell) {
       return;
     }
 
@@ -3132,6 +3310,17 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   function closeStoryboardEditor() {
     setStoryboardEditorCellId("");
+  }
+
+  function navigateStoryboardEditor(direction) {
+    const targetCell =
+      direction === "previous" ? previousStoryboardEditorCell : nextStoryboardEditorCell;
+
+    if (!targetCell) {
+      return;
+    }
+
+    setStoryboardEditorCellId(targetCell.id);
   }
 
   function openStoryboardClearConfirm() {
@@ -3151,17 +3340,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    setStoryboardCells(
-      normalizeStoryboardCells(
-        {},
-        professionalLayoutRows,
-        professionalLayoutColumns,
-        professionalDefaultCellAspectRatio,
-        availableAspectRatioValueSet,
-        professionalDefaultCellImageSize,
-        availableImageSizeValueSet,
-      ),
-    );
+    setStoryboardCells(normalizeStoryboardCells({}, professionalLayoutRows, professionalLayoutColumns));
     closeStoryboardClearConfirm();
     closeStoryboardEditor();
   }
@@ -3190,28 +3369,48 @@ function BananaStudioApp({ routeMode = "login" }) {
     }));
   }
 
-  function handleStoryboardAspectRatioChange(value) {
+  function handleSelectStoryboardLibraryRecord(record) {
     if (!storyboardEditorCellId) {
+      return;
+    }
+
+    const clonedRecord = cloneGenerationResultRecord(record);
+
+    if (!clonedRecord) {
       return;
     }
 
     updateStoryboardCell(storyboardEditorCellId, (cell) => ({
       ...cell,
-      aspectRatio: normalizeAspectRatioValue(value),
+      status: "success",
+      statusText: "已复用资源管理器中的图片",
       error: "",
+      record: clonedRecord,
     }));
+    setStoryboardLibraryPickerOpen(false);
   }
 
-  function handleStoryboardImageSizeChange(value) {
-    if (!storyboardEditorCellId) {
+  async function handleCopyStoryboardShare() {
+    if (!storyboardShareText) {
       return;
     }
 
-    updateStoryboardCell(storyboardEditorCellId, (cell) => ({
-      ...cell,
-      imageSize: normalizeImageSizeValue(value),
-      error: "",
-    }));
+    try {
+      await copyTextToClipboard(storyboardShareText);
+      setStoryboardShareCopyState("success");
+    } catch (error) {
+      console.warn("Copy storyboard share failed:", error);
+      setStoryboardShareCopyState("error");
+    }
+
+    if (storyboardShareCopyResetTimeoutRef.current) {
+      window.clearTimeout(storyboardShareCopyResetTimeoutRef.current);
+    }
+
+    storyboardShareCopyResetTimeoutRef.current = window.setTimeout(() => {
+      setStoryboardShareCopyState("idle");
+      storyboardShareCopyResetTimeoutRef.current = null;
+    }, 1800);
   }
 
   async function handleStoryboardCellGenerate() {
@@ -3251,7 +3450,6 @@ function BananaStudioApp({ routeMode = "login" }) {
       statusText: "banana 正在生图...",
       error: "",
     }));
-    closeStoryboardEditor();
 
     try {
       const mergedReferenceImages = [
@@ -3266,8 +3464,8 @@ function BananaStudioApp({ routeMode = "login" }) {
         buildProfessionalGenerationPayload({
           modelId: generationModelId,
           prompt: requestedPromptValue,
-          aspectRatio: editorCell.aspectRatio || professionalDefaultCellAspectRatio,
-          imageSize: editorCell.imageSize || professionalDefaultCellImageSize,
+          aspectRatio: professionalStoryboardAspectRatioValue,
+          imageSize: professionalStoryboardImageSizeValue,
           imageCount: 1,
           layoutRows: 1,
           layoutColumns: 1,
@@ -3990,7 +4188,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                         <div
                           id="professional-export-preview-capture"
                           className="professional-export-grid"
-                          style={storyboardGridStyle}
+                          style={professionalExportGridStyle}
                         >
                           {storyboardCellList.map((cell) => (
                             <div
@@ -4086,6 +4284,21 @@ function BananaStudioApp({ routeMode = "login" }) {
 
             {showProfessionalPanelControls ? (
               <>
+                <div className="professional-top-actions">
+                  <button
+                    type="button"
+                    className={`ghost-button storyboard-share-button${storyboardShareCopyState === "success" ? " is-success" : storyboardShareCopyState === "error" ? " is-error" : ""}`}
+                    onClick={handleCopyStoryboardShare}
+                    disabled={!storyboardShareText}
+                  >
+                    {storyboardShareCopyState === "success"
+                      ? "已复制分享"
+                      : storyboardShareCopyState === "error"
+                        ? "复制失败"
+                        : "复制分享"}
+                  </button>
+                </div>
+
                 <label className="field-label field-label-inline" htmlFor="bananaModelSelector">
                   <span>底模选择</span>
                   {selectedModel ? (
@@ -4311,65 +4524,16 @@ function BananaStudioApp({ routeMode = "login" }) {
                       <strong>分镜表格</strong>
                       <span>刷新后会自动恢复已填写内容和已生成图片。</span>
                     </div>
-                    <div className="layout-preview-controls" aria-label="分镜表格全局配文样式">
-                      <label
-                        className="image-option-field compact-range-field"
-                        htmlFor="storyboardCaptionFontSize"
+                    <div className="layout-preview-toolbar-actions">
+                      <button
+                        type="button"
+                        className="ghost-button storyboard-clear-button"
+                        onClick={openStoryboardClearConfirm}
+                        disabled={!storyboardHasContent || storyboardHasLoadingCells}
                       >
-                        <span className="field-label">
-                          配文字号
-                          <strong>{professionalStoryboardCaptionFontSizePercent}%</strong>
-                        </span>
-                        <input
-                          id="storyboardCaptionFontSize"
-                          name="storyboardCaptionFontSize"
-                          type="range"
-                          min={MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
-                          max={MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
-                          step="5"
-                          value={professionalStoryboardCaptionFontSizePercent}
-                          onChange={(event) =>
-                            setProfessionalStoryboardCaptionFontSizePercent(
-                              normalizeStoryboardCaptionFontSizePercent(event.target.value),
-                            )
-                          }
-                        />
-                      </label>
-
-                      <label
-                        className="image-option-field compact-range-field"
-                        htmlFor="storyboardCaptionBackgroundAlpha"
-                      >
-                        <span className="field-label">
-                          配文底色
-                          <strong>{professionalStoryboardCaptionBackgroundAlphaPercent}%</strong>
-                        </span>
-                        <input
-                          id="storyboardCaptionBackgroundAlpha"
-                          name="storyboardCaptionBackgroundAlpha"
-                          type="range"
-                          min={MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT}
-                          max={MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT}
-                          step="4"
-                          value={professionalStoryboardCaptionBackgroundAlphaPercent}
-                          onChange={(event) =>
-                            setProfessionalStoryboardCaptionBackgroundAlphaPercent(
-                              normalizeStoryboardCaptionBackgroundAlphaPercent(
-                                event.target.value,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
+                        清空表格
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="ghost-button storyboard-clear-button"
-                      onClick={openStoryboardClearConfirm}
-                      disabled={!storyboardHasContent || storyboardHasLoadingCells}
-                    >
-                      清空表格
-                    </button>
                   </div>
 
                   <div className="layout-preview-shell">
@@ -4387,7 +4551,6 @@ function BananaStudioApp({ routeMode = "login" }) {
                             role="gridcell"
                             className={`storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
                             onClick={() => openStoryboardEditor(cell.id)}
-                            disabled={cell.status === "loading"}
                             aria-label={`${cell.label}${cell.status === "loading" ? "，生成中" : ""}`}
                           >
                             {cell.record ? (
@@ -4420,6 +4583,159 @@ function BananaStudioApp({ routeMode = "login" }) {
                         ))}
                       </div>
                     </div>
+                  </div>
+
+                  <div className="storyboard-style-disclosure">
+                    <button
+                      type="button"
+                      className={`storyboard-style-toggle${storyboardImageControlsCollapsed ? "" : " is-open"}`}
+                      aria-expanded={!storyboardImageControlsCollapsed}
+                      aria-controls="storyboard-image-controls"
+                      onClick={() =>
+                        setStoryboardImageControlsCollapsed((currentValue) => !currentValue)
+                      }
+                    >
+                      <span>图片设置</span>
+                      <span className="storyboard-style-toggle-meta">
+                        比例 {professionalStoryboardAspectRatioValue} · 分辨率 {professionalStoryboardImageSizeValue}
+                      </span>
+                      <span className="storyboard-style-toggle-icon" aria-hidden="true">
+                        ▾
+                      </span>
+                    </button>
+
+                    {!storyboardImageControlsCollapsed ? (
+                      <div
+                        id="storyboard-image-controls"
+                        className="layout-preview-controls storyboard-style-controls-panel"
+                        aria-label="分镜表格图片设置"
+                      >
+                        <label
+                          className="image-option-field"
+                          htmlFor="storyboardGlobalAspectRatio"
+                        >
+                          <span className="field-label">图片比例</span>
+                          <select
+                            id="storyboardGlobalAspectRatio"
+                            name="storyboardGlobalAspectRatio"
+                            className="model-selector compact-selector"
+                            value={professionalStoryboardAspectRatioValue}
+                            onChange={(event) =>
+                              setProfessionalStoryboardAspectRatio(
+                                normalizeAspectRatioValue(event.target.value),
+                              )
+                            }
+                          >
+                            {availableAspectRatioOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label
+                          className="image-option-field"
+                          htmlFor="storyboardGlobalImageSize"
+                        >
+                          <span className="field-label">分辨率</span>
+                          <select
+                            id="storyboardGlobalImageSize"
+                            name="storyboardGlobalImageSize"
+                            className="model-selector compact-selector"
+                            value={professionalStoryboardImageSizeValue}
+                            onChange={(event) =>
+                              setProfessionalStoryboardImageSize(
+                                normalizeImageSizeValue(event.target.value),
+                              )
+                            }
+                          >
+                            {availableImageSizeOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="storyboard-style-disclosure">
+                    <button
+                      type="button"
+                      className={`storyboard-style-toggle${storyboardStyleControlsCollapsed ? "" : " is-open"}`}
+                      aria-expanded={!storyboardStyleControlsCollapsed}
+                      aria-controls="storyboard-style-controls"
+                      onClick={() =>
+                        setStoryboardStyleControlsCollapsed((currentValue) => !currentValue)
+                      }
+                    >
+                      <span>表格样式设置</span>
+                      <span className="storyboard-style-toggle-meta">
+                        分割线 {professionalStoryboardDividerWidthPx}px · 配文字号 {professionalStoryboardCaptionFontSizePercent}%
+                      </span>
+                      <span className="storyboard-style-toggle-icon" aria-hidden="true">
+                        ▾
+                      </span>
+                    </button>
+
+                    {!storyboardStyleControlsCollapsed ? (
+                      <div
+                        id="storyboard-style-controls"
+                        className="layout-preview-controls storyboard-style-controls-panel"
+                        aria-label="分镜表格样式设置"
+                      >
+
+                        <label
+                          className="image-option-field compact-range-field"
+                          htmlFor="storyboardDividerWidth"
+                        >
+                          <span className="field-label">
+                            分割线
+                            <strong>{professionalStoryboardDividerWidthPx}px</strong>
+                          </span>
+                          <input
+                            id="storyboardDividerWidth"
+                            name="storyboardDividerWidth"
+                            type="range"
+                            min={MIN_STORYBOARD_DIVIDER_WIDTH_PX}
+                            max={MAX_STORYBOARD_DIVIDER_WIDTH_PX}
+                            step="1"
+                            value={professionalStoryboardDividerWidthPx}
+                            onChange={(event) =>
+                              setProfessionalStoryboardDividerWidthPx(
+                                normalizeStoryboardDividerWidthPx(event.target.value),
+                              )
+                            }
+                          />
+                        </label>
+
+                        <label
+                          className="image-option-field compact-range-field"
+                          htmlFor="storyboardCaptionFontSize"
+                        >
+                          <span className="field-label">
+                            配文字号
+                            <strong>{professionalStoryboardCaptionFontSizePercent}%</strong>
+                          </span>
+                          <input
+                            id="storyboardCaptionFontSize"
+                            name="storyboardCaptionFontSize"
+                            type="range"
+                            min={MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                            max={MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                            step="5"
+                            value={professionalStoryboardCaptionFontSizePercent}
+                            onChange={(event) =>
+                              setProfessionalStoryboardCaptionFontSizePercent(
+                                normalizeStoryboardCaptionFontSizePercent(event.target.value),
+                              )
+                            }
+                          />
+                        </label>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </>
@@ -4458,7 +4774,24 @@ function BananaStudioApp({ routeMode = "login" }) {
         >
           <section className="storyboard-editor-panel">
             <div className="storyboard-editor-windowbar">
-              <span className="finder-window-spacer" aria-hidden="true" />
+              <div className="storyboard-editor-nav" aria-label="切换分镜格子">
+                <button
+                  type="button"
+                  className="ghost-button storyboard-editor-nav-button"
+                  onClick={() => navigateStoryboardEditor("previous")}
+                  disabled={!previousStoryboardEditorCell}
+                >
+                  向前一格
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button storyboard-editor-nav-button"
+                  onClick={() => navigateStoryboardEditor("next")}
+                  disabled={!nextStoryboardEditorCell}
+                >
+                  向后一格
+                </button>
+              </div>
               <strong>
                 {storyboardEditorCell.label} · 行 {storyboardEditorCell.row} / 列 {storyboardEditorCell.column}
               </strong>
@@ -4476,42 +4809,10 @@ function BananaStudioApp({ routeMode = "login" }) {
               </button>
             </div>
 
-            <div className={`storyboard-editor-layout${storyboardEditorCell.record ? " has-preview" : ""}`}>
+            <div className="storyboard-editor-layout has-preview">
               <div className="storyboard-editor-form">
                 <label className="field-label" htmlFor="storyboardCellPrompt">
                   这个格子的提示词
-                </label>
-                <label className="image-option-field" htmlFor="storyboardCellAspectRatio">
-                  <span className="field-label">图片比例</span>
-                  <select
-                    id="storyboardCellAspectRatio"
-                    name="storyboardCellAspectRatio"
-                    className="model-selector compact-selector"
-                    value={storyboardEditorCell.aspectRatio || professionalDefaultCellAspectRatio}
-                    onChange={(event) => handleStoryboardAspectRatioChange(event.target.value)}
-                  >
-                    {availableAspectRatioOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="image-option-field" htmlFor="storyboardCellImageSize">
-                  <span className="field-label">分辨率</span>
-                  <select
-                    id="storyboardCellImageSize"
-                    name="storyboardCellImageSize"
-                    className="model-selector compact-selector"
-                    value={storyboardEditorCell.imageSize || professionalDefaultCellImageSize}
-                    onChange={(event) => handleStoryboardImageSizeChange(event.target.value)}
-                  >
-                    {availableImageSizeOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
                 </label>
                 <textarea
                   id="storyboardCellPrompt"
@@ -4625,8 +4926,10 @@ function BananaStudioApp({ routeMode = "login" }) {
                 </div>
               </div>
 
-              {storyboardEditorCell.record ? (
-                <div className="storyboard-editor-preview-card">
+              <div
+                className={`storyboard-editor-preview-card${storyboardEditorCell.status === "loading" && storyboardEditorCell.record ? " is-refreshing" : ""}`}
+              >
+                {storyboardEditorCell.record ? (
                   <button
                     type="button"
                     className="storyboard-editor-preview-button"
@@ -4639,19 +4942,72 @@ function BananaStudioApp({ routeMode = "login" }) {
                       draggable="false"
                     />
                   </button>
-                  <div className="storyboard-editor-preview-meta">
-                    <strong>已生成图片</strong>
-                    <span>
-                      {storyboardEditorCell.record.imageSize || storyboardEditorCell.imageSize || professionalDefaultCellImageSize}
-                      {storyboardEditorCell.record.aspectRatio
-                        ? ` · ${storyboardEditorCell.record.aspectRatio}`
-                        : storyboardEditorCell.aspectRatio
-                          ? ` · ${storyboardEditorCell.aspectRatio}`
-                          : ""}
-                    </span>
+                ) : (
+                  <div className="storyboard-editor-preview-empty">
+                    <strong>当前还没有图片</strong>
+                    <span>可以直接生成，也可以从资源管理器里复用一张已有图片。</span>
                   </div>
+                )}
+                <div className="storyboard-editor-preview-meta">
+                  <strong>{storyboardEditorCell.record ? "已生成图片" : "图片预览区"}</strong>
+                  <span>
+                    {storyboardEditorCell.record
+                      ? `${storyboardEditorCell.record.imageSize || professionalStoryboardImageSizeValue}${
+                          storyboardEditorCell.record.aspectRatio
+                            ? ` · ${storyboardEditorCell.record.aspectRatio}`
+                            : ` · ${professionalStoryboardAspectRatioValue}`
+                        }`
+                      : `目标生成规格 · ${professionalStoryboardImageSizeValue} · ${professionalStoryboardAspectRatioValue}`}
+                  </span>
                 </div>
-              ) : null}
+                <button
+                  type="button"
+                  className="ghost-button storyboard-editor-library-button"
+                  onClick={() =>
+                    setStoryboardLibraryPickerOpen((currentValue) => !currentValue)
+                  }
+                  disabled={storyboardEditorCell.status === "loading"}
+                >
+                  {storyboardLibraryPickerOpen ? "收起图片列表" : "选择图片"}
+                </button>
+                {storyboardLibraryPickerOpen ? (
+                  generationLibrary.length > 0 ? (
+                    <div className="storyboard-library-picker" role="list" aria-label="资源管理器图片列表">
+                      {generationLibrary.map((record) => {
+                        const isSelected = storyboardEditorCell.record?.id === record.id;
+                        const fileTitle = record.downloadName || `banana-${record.id}.png`;
+
+                        return (
+                          <button
+                            key={record.id}
+                            type="button"
+                            role="listitem"
+                            className={`storyboard-library-item${isSelected ? " is-selected" : ""}`}
+                            onClick={() => handleSelectStoryboardLibraryRecord(record)}
+                          >
+                            <span className="storyboard-library-item-media">
+                              <img src={record.previewUrl} alt={fileTitle} draggable="false" />
+                            </span>
+                            <span className="storyboard-library-item-copy">
+                              <strong title={fileTitle}>{fileTitle}</strong>
+                              <span>
+                                {record.imageSize || "已保存"}
+                                {record.aspectRatio ? ` · ${record.aspectRatio}` : ""}
+                              </span>
+                              <small>{formatPersistedAt(record.persistedAt)}</small>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="empty-state storyboard-library-empty-state">
+                      <p>资源管理器里还没有图片。</p>
+                      <small>先生成一张图，之后就可以在这里复用。</small>
+                    </div>
+                  )
+                ) : null}
+              </div>
             </div>
           </section>
         </div>
