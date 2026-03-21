@@ -919,6 +919,21 @@ function writeSseEvent(response, eventName, payload) {
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+const SSE_HEARTBEAT_INTERVAL_MS = 25 * 1000;
+
+function startSseHeartbeat(response, getPayload) {
+  return setInterval(() => {
+    if (response.writableEnded || response.destroyed) {
+      return;
+    }
+
+    writeSseEvent(response, "status", {
+      stage: "heartbeat",
+      ...(typeof getPayload === "function" ? getPayload() : {}),
+    });
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+}
+
 async function parseSseResponseStream(stream, onMessage) {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1665,6 +1680,7 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
   prepareSseResponse(response);
   const abortController = new AbortController();
   const requestId = buildRequestId();
+  const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
   let closed = false;
   let consumedQuotaAmount = 0;
 
@@ -1857,16 +1873,24 @@ app.post("/api/generate/stream", ensureAuthenticated, async (request, response) 
       }
     }
 
-    await logBackend("error", "Generate stream request failed", {
-      requestId,
-      route: "/api/generate/stream",
-      error,
-    });
+    if (closed && error?.name === "AbortError") {
+      await logBackend("info", "Generate stream request aborted after client disconnect", {
+        requestId,
+        route: "/api/generate/stream",
+      });
+    } else {
+      await logBackend("error", "Generate stream request failed", {
+        requestId,
+        route: "/api/generate/stream",
+        error,
+      });
+    }
     if (!closed) {
       const message = error instanceof Error ? error.message : "banana 生图失败";
       writeSseEvent(response, "error", { error: message });
     }
   } finally {
+    clearInterval(heartbeatTimer);
     if (!closed) {
       response.end();
     }
@@ -1877,6 +1901,7 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
   prepareSseResponse(response);
   const abortController = new AbortController();
   const requestId = buildRequestId();
+  const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
   let closed = false;
   let consumedQuotaAmount = 0;
 
@@ -2060,16 +2085,24 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       }
     }
 
-    await logBackend("error", "Enhance stream request failed", {
-      requestId,
-      route: "/api/enhance/stream",
-      error,
-    });
+    if (closed && error?.name === "AbortError") {
+      await logBackend("info", "Enhance stream request aborted after client disconnect", {
+        requestId,
+        route: "/api/enhance/stream",
+      });
+    } else {
+      await logBackend("error", "Enhance stream request failed", {
+        requestId,
+        route: "/api/enhance/stream",
+        error,
+      });
+    }
     if (!closed) {
       const message = error instanceof Error ? error.message : "提升清晰度失败";
       writeSseEvent(response, "error", { error: message });
     }
   } finally {
+    clearInterval(heartbeatTimer);
     if (!closed) {
       response.end();
     }
