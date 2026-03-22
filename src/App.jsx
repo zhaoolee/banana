@@ -1,3 +1,19 @@
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  rectSwappingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import localforage from "localforage";
 import AdminApp from "./AdminApp.jsx";
@@ -61,6 +77,8 @@ const MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 440;
 const DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 90;
 const MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 72;
 const MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 100;
+const STORYBOARD_DRAG_ACTIVATION_DISTANCE_PX = 6;
+const STORYBOARD_DRAG_CLICK_SUPPRESSION_MS = 240;
 const SIMPLE_PANEL_DEFAULTS = {
   modelId: "nano-banana-2",
   aspectRatio: "3:4",
@@ -447,6 +465,51 @@ function createStoryboardCellState(definition) {
   };
 }
 
+function buildStoryboardCellContentSnapshot(cell) {
+  return {
+    prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
+    caption: typeof cell?.caption === "string" ? cell.caption : "",
+    referenceImages: Array.isArray(cell?.referenceImages)
+      ? cell.referenceImages.slice(0, STORYBOARD_CELL_REFERENCE_LIMIT)
+      : [],
+    status:
+      cell?.status === "loading" || cell?.status === "success" ? cell.status : "idle",
+    statusText: typeof cell?.statusText === "string" ? cell.statusText : "",
+    error: typeof cell?.error === "string" ? cell.error : "",
+    record: cell?.record || null,
+  };
+}
+
+function swapStoryboardCellContent(currentCells, sourceCellId, targetCellId) {
+  const sourceCell = currentCells[sourceCellId];
+  const targetCell = currentCells[targetCellId];
+
+  if (
+    !sourceCell ||
+    !targetCell ||
+    sourceCellId === targetCellId ||
+    sourceCell.status === "loading" ||
+    targetCell.status === "loading"
+  ) {
+    return currentCells;
+  }
+
+  const sourceContent = buildStoryboardCellContentSnapshot(sourceCell);
+  const targetContent = buildStoryboardCellContentSnapshot(targetCell);
+
+  return {
+    ...currentCells,
+    [sourceCellId]: {
+      ...sourceCell,
+      ...targetContent,
+    },
+    [targetCellId]: {
+      ...targetCell,
+      ...sourceContent,
+    },
+  };
+}
+
 function normalizeStoryboardCells(currentCells, rows, columns) {
   return Object.fromEntries(
     buildStoryboardCellDefinitions(rows, columns).map((definition) => {
@@ -480,6 +543,92 @@ function formatStoryboardPromptPreview(value) {
   }
 
   return text.length > 40 ? `${text.slice(0, 40)}...` : text;
+}
+
+function buildStoryboardCellClassName(
+  cell,
+  { dragDisabled = false, isDragging = false, isDropTarget = false, isOverlay = false } = {},
+) {
+  return `storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}${dragDisabled ? " is-drag-disabled" : ""}${isDragging ? " is-dragging" : ""}${isDropTarget ? " is-drop-target" : ""}${isOverlay ? " is-overlay" : ""}`;
+}
+
+function buildStoryboardCellTransformStyle(transform, transition) {
+  return {
+    transform: CSS.Transform.toString(transform),
+    transition: [
+      transition,
+      "background 180ms ease",
+      "box-shadow 180ms ease",
+      "filter 180ms ease",
+      "opacity 180ms ease",
+    ]
+      .filter(Boolean)
+      .join(", "),
+  };
+}
+
+function StoryboardCellContent({ cell }) {
+  return (
+    <>
+      {cell.record ? (
+        <img
+          className="storyboard-cell-image"
+          src={cell.record.previewUrl}
+          alt={`${cell.label} 生成结果`}
+          draggable="false"
+          loading="lazy"
+          decoding="async"
+        />
+      ) : null}
+      <span className="storyboard-cell-index">{cell.index}</span>
+      <span className="storyboard-cell-prompt">
+        {formatStoryboardPromptPreview(cell.prompt)}
+      </span>
+      <span className="storyboard-cell-status">
+        {cell.status === "loading"
+          ? "生成中"
+          : cell.record
+            ? "已生成"
+            : "待填写"}
+      </span>
+      {normalizeTextValue(cell.caption) ? (
+        <span className="storyboard-cell-caption">
+          <span className="storyboard-cell-caption-text">
+            {normalizeTextValue(cell.caption)}
+          </span>
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+function SortableStoryboardCell({ cell, dragDisabled = false, onOpen }) {
+  const { attributes, isDragging, isOver, listeners, setNodeRef, transform, transition } =
+    useSortable({
+      id: cell.id,
+      disabled: dragDisabled,
+    });
+
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      role="gridcell"
+      className={buildStoryboardCellClassName(cell, {
+        dragDisabled,
+        isDragging,
+        isDropTarget: isOver && !isDragging,
+      })}
+      style={buildStoryboardCellTransformStyle(transform, transition)}
+      onClick={() => onOpen(cell.id)}
+      aria-label={`${cell.label}${dragDisabled ? "，生成中暂不可拖拽" : "，可拖拽调整顺序"}${cell.status === "loading" ? "，生成中" : ""}`}
+      aria-roledescription="可拖拽分镜格"
+      {...attributes}
+      {...listeners}
+    >
+      <StoryboardCellContent cell={cell} />
+    </button>
+  );
 }
 
 function parseAspectRatio(value) {
@@ -2216,6 +2365,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
   const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
   const [storyboardCellsHydrated, setStoryboardCellsHydrated] = useState(false);
+  const [activeStoryboardDragId, setActiveStoryboardDragId] = useState("");
   const [isMobilePerformanceMode, setIsMobilePerformanceMode] = useState(() =>
     detectMobilePerformanceMode(),
   );
@@ -2227,6 +2377,10 @@ function BananaStudioApp({ routeMode = "login" }) {
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const storyboardCaptionTextareaRef = useRef(null);
+  const storyboardDragClickSuppressionRef = useRef({
+    cellId: "",
+    timestamp: 0,
+  });
   const storyboardShareCopyResetTimeoutRef = useRef(null);
   const storyboardLibraryPickerTimeoutRef = useRef(null);
   const generationLibraryLoadPromiseRef = useRef(null);
@@ -2294,8 +2448,21 @@ function BananaStudioApp({ routeMode = "login" }) {
   const storyboardEditorCell = storyboardEditorCellId
     ? storyboardCells[storyboardEditorCellId] || null
     : null;
+  const activeStoryboardDragCell = activeStoryboardDragId
+    ? storyboardCells[activeStoryboardDragId] || null
+    : null;
   const isStoryboardEditorGenerateMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_GENERATE;
   const isStoryboardEditorAssetMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET;
+  const storyboardDragSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: STORYBOARD_DRAG_ACTIVATION_DISTANCE_PX,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2777,6 +2944,10 @@ function BananaStudioApp({ routeMode = "login" }) {
       storyboardCellDefinitions,
       storyboardCells,
     ],
+  );
+  const storyboardSortableIds = useMemo(
+    () => storyboardCellList.map((cell) => cell.id),
+    [storyboardCellList],
   );
   const storyboardEditorCellIndex = useMemo(
     () => storyboardCellList.findIndex((cell) => cell.id === storyboardEditorCellId),
@@ -4206,6 +4377,74 @@ function BananaStudioApp({ routeMode = "login" }) {
     setStoryboardEditorCellId(cellId);
   }
 
+  function suppressStoryboardCellOpen(cellId) {
+    storyboardDragClickSuppressionRef.current = {
+      cellId,
+      timestamp: Date.now(),
+    };
+  }
+
+  function isStoryboardCellOpenSuppressed(cellId) {
+    const { cellId: suppressedCellId, timestamp } = storyboardDragClickSuppressionRef.current;
+
+    if (!suppressedCellId || suppressedCellId !== cellId) {
+      return false;
+    }
+
+    if (Date.now() - timestamp > STORYBOARD_DRAG_CLICK_SUPPRESSION_MS) {
+      storyboardDragClickSuppressionRef.current = {
+        cellId: "",
+        timestamp: 0,
+      };
+      return false;
+    }
+
+    return true;
+  }
+
+  function handleStoryboardCellOpen(cellId) {
+    if (isStoryboardCellOpenSuppressed(cellId)) {
+      return;
+    }
+
+    openStoryboardEditor(cellId);
+  }
+
+  function handleStoryboardDragStart(event) {
+    const activeId = String(event.active?.id || "");
+
+    if (!activeId) {
+      return;
+    }
+
+    setActiveStoryboardDragId(activeId);
+  }
+
+  function handleStoryboardDragCancel() {
+    if (activeStoryboardDragId) {
+      suppressStoryboardCellOpen(activeStoryboardDragId);
+    }
+
+    setActiveStoryboardDragId("");
+  }
+
+  function handleStoryboardDragEnd(event) {
+    const activeId = String(event.active?.id || "");
+    const overId = String(event.over?.id || "");
+
+    if (activeId) {
+      suppressStoryboardCellOpen(activeId);
+    }
+
+    setActiveStoryboardDragId("");
+
+    if (!activeId || !overId || activeId === overId) {
+      return;
+    }
+
+    setStoryboardCells((currentValue) => swapStoryboardCellContent(currentValue, activeId, overId));
+  }
+
   function closeStoryboardEditor() {
     setStoryboardEditorCellId("");
     setStoryboardEditorMode(STORYBOARD_EDITOR_MODE_GENERATE);
@@ -5576,52 +5815,46 @@ function BananaStudioApp({ routeMode = "login" }) {
 
                   <div className="layout-preview-shell">
                     <div className="layout-preview-square" style={storyboardShellStyle}>
-                      <div
-                        className="storyboard-grid"
-                        style={storyboardGridStyle}
-                        role="grid"
-                        aria-label="专业模式分镜表格"
+                      <DndContext
+                        sensors={storyboardDragSensors}
+                        collisionDetection={closestCenter}
+                        onDragStart={handleStoryboardDragStart}
+                        onDragCancel={handleStoryboardDragCancel}
+                        onDragEnd={handleStoryboardDragEnd}
                       >
-                        {storyboardCellList.map((cell) => (
-                          <button
-                            key={cell.id}
-                            type="button"
-                            role="gridcell"
-                            className={`storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
-                            onClick={() => openStoryboardEditor(cell.id)}
-                            aria-label={`${cell.label}${cell.status === "loading" ? "，生成中" : ""}`}
+                        <SortableContext
+                          items={storyboardSortableIds}
+                          strategy={rectSwappingStrategy}
+                        >
+                          <div
+                            className={`storyboard-grid${activeStoryboardDragId ? " is-sorting" : ""}`}
+                            style={storyboardGridStyle}
+                            role="grid"
+                            aria-label="专业模式分镜表格，可拖拽调整格子顺序"
                           >
-                            {cell.record ? (
-                              <img
-                                className="storyboard-cell-image"
-                                src={cell.record.previewUrl}
-                                alt={`${cell.label} 生成结果`}
-                                draggable="false"
-                                loading="lazy"
-                                decoding="async"
+                            {storyboardCellList.map((cell) => (
+                              <SortableStoryboardCell
+                                key={cell.id}
+                                cell={cell}
+                                dragDisabled={cell.status === "loading"}
+                                onOpen={handleStoryboardCellOpen}
                               />
-                            ) : null}
-                            <span className="storyboard-cell-index">{cell.index}</span>
-                            <span className="storyboard-cell-prompt">
-                              {formatStoryboardPromptPreview(cell.prompt)}
-                            </span>
-                            <span className="storyboard-cell-status">
-                              {cell.status === "loading"
-                                ? "生成中"
-                                : cell.record
-                                  ? "已生成"
-                                  : "待填写"}
-                            </span>
-                            {normalizeTextValue(cell.caption) ? (
-                              <span className="storyboard-cell-caption">
-                                <span className="storyboard-cell-caption-text">
-                                  {normalizeTextValue(cell.caption)}
-                                </span>
-                              </span>
-                            ) : null}
-                          </button>
-                        ))}
-                      </div>
+                            ))}
+                          </div>
+                        </SortableContext>
+                        <DragOverlay dropAnimation={null}>
+                          {activeStoryboardDragCell ? (
+                            <div
+                              className={buildStoryboardCellClassName(activeStoryboardDragCell, {
+                                isOverlay: true,
+                              })}
+                              aria-hidden="true"
+                            >
+                              <StoryboardCellContent cell={activeStoryboardDragCell} />
+                            </div>
+                          ) : null}
+                        </DragOverlay>
+                      </DndContext>
                     </div>
                   </div>
 
