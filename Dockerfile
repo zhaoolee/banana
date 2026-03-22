@@ -1,4 +1,4 @@
-FROM node:22-alpine AS builder
+FROM node:22-bookworm AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine
+FROM node:22-bookworm
 
 WORKDIR /app
 
@@ -17,6 +17,7 @@ ENV PORT=23001
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
+RUN npx playwright install --with-deps chromium
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server ./server

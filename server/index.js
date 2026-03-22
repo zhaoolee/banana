@@ -29,6 +29,7 @@ const generationsDir = path.join(rootDir, "storage", "generations");
 const logsDir = path.join(rootDir, "storage", "logs");
 const pwStoreFilePath = path.join(rootDir, "storage", "pw-store.json");
 const port = Number(process.env.PORT || 23001);
+const host = (process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const ALL_SUPPORTED_ASPECT_RATIOS = [
   "1:1",
   "1:4",
@@ -2092,7 +2093,7 @@ app.post("/api/export/professional-preview", ensureAuthenticated, async (request
     response.status(500).json({
       error: message,
       hint: isBrowserInstallError
-        ? "Run `npx playwright install chromium` in this project."
+        ? "Install Chromium for Playwright in the runtime environment and rebuild the container image."
         : undefined,
     });
   }
@@ -3050,9 +3051,9 @@ if (await hasDistIndex()) {
 await ensureBootstrapPwRecord();
 await logBackend("info", "Google generation backend configured", await getResolvedGoogleBackendSummary());
 
-const server = app.listen(port, () => {
+const server = app.listen(port, host, () => {
   void logBackend("info", "Backend listening", {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://${host}:${port}`,
   });
 });
 
