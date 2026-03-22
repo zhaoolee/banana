@@ -406,9 +406,12 @@ function AdminApp() {
   return (
     <div className="page-shell admin-shell">
       <header className="studio-topbar admin-topbar">
-        <div>
+        <div className="studio-brand studio-brand-with-copy">
+          <img className="studio-brand-logo" src="/logo.png" alt="Banana Studio" />
+          <div>
           <p className="eyebrow">BANANA ADMIN</p>
           <h1>PW 管理面板</h1>
+          </div>
         </div>
         <div className="admin-topbar-actions">
           <div className="admin-session-meta">

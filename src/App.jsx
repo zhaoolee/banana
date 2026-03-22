@@ -16,6 +16,7 @@ const LEGACY_PROMPT_STORAGE_KEY = "banana.prompt";
 const PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY = "banana.professional.selectedModelId";
 const PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY = "banana.professional.globalPrompt";
 const PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY = "banana.professional.canvasSize";
+const PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY = "banana.professional.customScenarios";
 const PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY = "banana.professional.customCanvasWidth";
 const PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY = "banana.professional.customCanvasHeight";
 const PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY = "banana.professional.selectedLayoutRows";
@@ -42,13 +43,15 @@ const PROMPT_TEXTAREA_MAX_ROWS = 5;
 const PANEL_MODE_SIMPLE = "simple";
 const PANEL_MODE_PROFESSIONAL = "professional";
 const CUSTOM_CANVAS_SIZE_VALUE = "custom";
+const STORYBOARD_EDITOR_MODE_GENERATE = "generate";
+const STORYBOARD_EDITOR_MODE_ASSET = "asset";
 const PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO = "1:1";
 const PROFESSIONAL_STYLE_REFERENCE_LIMIT = 1;
 const STORYBOARD_CELL_REFERENCE_LIMIT = 1;
 const DEFAULT_CUSTOM_CANVAS_WIDTH = 1080;
 const DEFAULT_CUSTOM_CANVAS_HEIGHT = 1440;
 const DEFAULT_STORYBOARD_DIVIDER_WIDTH_PX = 2;
-const MIN_STORYBOARD_DIVIDER_WIDTH_PX = 1;
+const MIN_STORYBOARD_DIVIDER_WIDTH_PX = 0;
 const MAX_STORYBOARD_DIVIDER_WIDTH_PX = 8;
 const DEFAULT_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 100;
 const MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT = 70;
@@ -81,21 +84,70 @@ const ASPECT_RATIO_OPTIONS = [
   { value: "21:9", label: "超宽 21:9" },
 ];
 const CANVAS_SIZE_OPTIONS = [
-  { value: "programmer-lv1-lv7", label: "程序员LV1到LV7 544 x 1968", width: 544, height: 1968 },
-  { value: "xiaohongshu-cover", label: "小红书封面 1080 x 1440", width: 1080, height: 1440 },
-  { value: "poster-a4-portrait", label: "海报 A4 竖版", width: 210, height: 297 },
-  { value: "poster-a4-landscape", label: "海报 A4 横版", width: 297, height: 210 },
-  { value: "poster-a3-portrait", label: "海报 A3 竖版", width: 297, height: 420 },
-  { value: "poster-a3-landscape", label: "海报 A3 横版", width: 420, height: 297 },
-  { value: "poster-24x36", label: "海报 24 x 36 in", width: 24, height: 36 },
-  { value: "poster-18x24", label: "海报 18 x 24 in", width: 18, height: 24 },
-  { value: "magazine-us-letter", label: "杂志 Letter 竖版", width: 8.5, height: 11 },
-  { value: "magazine-tabloid", label: "杂志 Tabloid", width: 11, height: 17 },
-  { value: "magazine-square", label: "杂志方版", width: 210, height: 210 },
-];
-const CANVAS_SIZE_SELECT_OPTIONS = [
-  ...CANVAS_SIZE_OPTIONS,
-  { value: CUSTOM_CANVAS_SIZE_VALUE, label: "自定义尺寸" },
+  {
+    value: "programmer-lv1-lv7",
+    label: "程序员LV1到LV7",
+    width: 1088,
+    height: 3936,
+    layoutRows: 7,
+    layoutColumns: 1,
+  },
+  {
+    value: "xiaohongshu-cover",
+    label: "小红书封面",
+    width: 1080,
+    height: 1440,
+    layoutRows: 1,
+    layoutColumns: 1,
+  },
+  {
+    value: "xiaohongshu-cover-8-grid",
+    label: "小红书封面8宫格",
+    width: 1080,
+    height: 1440,
+    layoutRows: 2,
+    layoutColumns: 4,
+  },
+  {
+    value: "square-logo",
+    label: "方形LOGO",
+    width: 1024,
+    height: 1024,
+    layoutRows: 1,
+    layoutColumns: 1,
+  },
+  {
+    value: "logo-selection-8-grid",
+    label: "LOGO选品8宫格",
+    width: 2048,
+    height: 4096,
+    layoutRows: 4,
+    layoutColumns: 2,
+  },
+  {
+    value: "phone-wallpaper",
+    label: "手机壁纸",
+    width: 1440,
+    height: 3200,
+    layoutRows: 1,
+    layoutColumns: 1,
+  },
+  {
+    value: "pc-wallpaper",
+    label: "PC壁纸",
+    width: 3840,
+    height: 2160,
+    layoutRows: 1,
+    layoutColumns: 1,
+  },
+  {
+    value: "ipad-wallpaper",
+    label: "iPad壁纸",
+    width: 2732,
+    height: 2048,
+    layoutRows: 1,
+    layoutColumns: 1,
+  },
 ];
 const SUPPORTED_ASPECT_RATIO_VALUES = new Set(ASPECT_RATIO_OPTIONS.map((option) => option.value));
 const SUPPORTED_CANVAS_SIZE_VALUES = new Set(CANVAS_SIZE_OPTIONS.map((option) => option.value));
@@ -150,12 +202,6 @@ function normalizeImageSizeValue(value) {
 function normalizeImageCountValue(value) {
   const parsedValue = Number.parseInt(String(value ?? ""), 10);
   return SUPPORTED_IMAGE_COUNT_VALUES.has(parsedValue) ? parsedValue : 1;
-}
-
-function normalizeCanvasSizeValue(value) {
-  return SUPPORTED_CANVAS_SIZE_VALUES.has(value) || value === CUSTOM_CANVAS_SIZE_VALUE
-    ? value
-    : "poster-a4-portrait";
 }
 
 function normalizeCanvasDimensionValue(value, fallbackValue) {
@@ -306,33 +352,56 @@ function resolveSimplePanelModelId(models, fallbackModelId) {
 }
 
 function resolveCanvasSizeFromLegacyAspectRatio(aspectRatioValue) {
-  const orientation = getAspectRatioOrientation(aspectRatioValue);
-
-  if (orientation === "landscape") {
-    return "poster-a4-landscape";
-  }
-
-  if (orientation === "square") {
-    return "magazine-square";
-  }
-
-  return "poster-a4-portrait";
+  return aspectRatioValue === "3:4" ? "xiaohongshu-cover" : "programmer-lv1-lv7";
 }
 
-function getCanvasSizeOption(value, customWidth = DEFAULT_CUSTOM_CANVAS_WIDTH, customHeight = DEFAULT_CUSTOM_CANVAS_HEIGHT) {
+function getCanvasSizeOption(
+  value,
+  customWidth = DEFAULT_CUSTOM_CANVAS_WIDTH,
+  customHeight = DEFAULT_CUSTOM_CANVAS_HEIGHT,
+  customScenarios = [],
+  customLayoutRows = 1,
+  customLayoutColumns = 1,
+) {
   if (value === CUSTOM_CANVAS_SIZE_VALUE) {
     const width = normalizeCanvasDimensionValue(customWidth, DEFAULT_CUSTOM_CANVAS_WIDTH);
     const height = normalizeCanvasDimensionValue(customHeight, DEFAULT_CUSTOM_CANVAS_HEIGHT);
 
     return {
       value: CUSTOM_CANVAS_SIZE_VALUE,
-      label: `自定义 ${width} x ${height}`,
+      label: `自定义场景 ${width} x ${height}`,
       width,
       height,
+      layoutRows: clampLayoutTrack(customLayoutRows),
+      layoutColumns: clampLayoutTrack(customLayoutColumns),
     };
   }
 
-  return CANVAS_SIZE_OPTIONS.find((option) => option.value === value) || CANVAS_SIZE_OPTIONS[0];
+  return [...CANVAS_SIZE_OPTIONS, ...customScenarios].find((option) => option.value === value) ||
+    CANVAS_SIZE_OPTIONS[0];
+}
+
+function getCanvasScenarioOption(value, customScenarios = []) {
+  if (value === CUSTOM_CANVAS_SIZE_VALUE) {
+    return {
+      value: CUSTOM_CANVAS_SIZE_VALUE,
+      label: "自定义场景",
+      layoutRows: 1,
+      layoutColumns: 1,
+    };
+  }
+
+  return [...CANVAS_SIZE_OPTIONS, ...customScenarios].find((option) => option.value === value) ||
+    CANVAS_SIZE_OPTIONS[0];
+}
+
+function normalizeCanvasScenarioValue(value, customScenarios = []) {
+  const customScenarioIds = new Set(customScenarios.map((scenario) => scenario.value));
+
+  return SUPPORTED_CANVAS_SIZE_VALUES.has(value) ||
+    customScenarioIds.has(value)
+    ? value
+    : CANVAS_SIZE_OPTIONS[0].value;
 }
 
 function buildLayoutCells(rows, columns) {
@@ -664,6 +733,61 @@ function writeLocalValue(key, value) {
   window.localStorage.setItem(key, value);
 }
 
+function readStoredProfessionalCustomScenarios() {
+  const rawValue = readLocalValue(PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY);
+
+  if (!rawValue) {
+    return [];
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue);
+
+    if (!Array.isArray(parsedValue)) {
+      return [];
+    }
+
+    return parsedValue
+      .map((item, index) => {
+        const label = normalizeTextValue(item?.label);
+        const width = normalizeCanvasDimensionValue(item?.width, DEFAULT_CUSTOM_CANVAS_WIDTH);
+        const height = normalizeCanvasDimensionValue(item?.height, DEFAULT_CUSTOM_CANVAS_HEIGHT);
+        const layoutRows = clampLayoutTrack(item?.layoutRows);
+        const layoutColumns = clampLayoutTrack(item?.layoutColumns);
+
+        if (!label) {
+          return null;
+        }
+
+        return {
+          value:
+            normalizeTextValue(item?.value) ||
+            normalizeTextValue(item?.id) ||
+            `custom-scene-${index + 1}`,
+          label,
+          width,
+          height,
+          layoutRows,
+          layoutColumns,
+        };
+      })
+      .filter(Boolean);
+  } catch (_error) {
+    return [];
+  }
+}
+
+function buildPersistedProfessionalCustomScenarios(scenarios) {
+  return scenarios.map((scenario) => ({
+    value: scenario.value,
+    label: scenario.label,
+    width: scenario.width,
+    height: scenario.height,
+    layoutRows: scenario.layoutRows,
+    layoutColumns: scenario.layoutColumns,
+  }));
+}
+
 function buildDownloadName() {
   return buildDownloadNameWithOptions();
 }
@@ -852,6 +976,21 @@ async function readFileAsReferenceImage(file) {
     previewUrl: dataUrl,
     data: base64,
   };
+}
+
+async function readFileAsGenerationResultRecord(file) {
+  const image = await readFileAsReferenceImage(file);
+
+  return restorePersistedGenerationResultRecord({
+    id: createPersistedRecordId(),
+    persistedAt: new Date().toISOString(),
+    downloadName: file.name || buildDownloadNameWithOptions({ mimeType: image.mimeType }),
+    promptSnapshot: "",
+    imageSize: "本地导入",
+    aspectRatio: "",
+    imageBase64: image.data,
+    mimeType: image.mimeType,
+  });
 }
 
 function buildPwHeaders(password) {
@@ -1677,12 +1816,16 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [professionalGlobalPrompt, setProfessionalGlobalPrompt] = useState(() =>
     readLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY),
   );
+  const [professionalCustomScenarios, setProfessionalCustomScenarios] = useState(() =>
+    readStoredProfessionalCustomScenarios(),
+  );
   const [professionalCanvasSize, setProfessionalCanvasSize] = useState(() =>
-    normalizeCanvasSizeValue(
+    normalizeCanvasScenarioValue(
       readLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY) ||
         resolveCanvasSizeFromLegacyAspectRatio(
           readLocalValue(LEGACY_SELECTED_ASPECT_RATIO_STORAGE_KEY) || "1:1",
         ),
+      readStoredProfessionalCustomScenarios(),
     ),
   );
   const [professionalLayoutRows, setProfessionalLayoutRows] = useState(() =>
@@ -1740,6 +1883,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [generationResult, setGenerationResult] = useState(null);
   const [generationResults, setGenerationResults] = useState([]);
   const [generationLibrary, setGenerationLibrary] = useState([]);
+  const [resourceManagerPending, setResourceManagerPending] = useState(false);
   const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
   const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
   const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
@@ -1791,7 +1935,19 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardCells, setStoryboardCells] = useState(() =>
     normalizeStoryboardCells({}, professionalLayoutRows, professionalLayoutColumns),
   );
+  const [scenarioManagerOpen, setScenarioManagerOpen] = useState(false);
+  const [scenarioManagerSelectedType, setScenarioManagerSelectedType] = useState("new");
+  const [scenarioManagerDraft, setScenarioManagerDraft] = useState(() => ({
+    value: "",
+    label: "",
+    width: String(DEFAULT_CUSTOM_CANVAS_WIDTH),
+    height: String(DEFAULT_CUSTOM_CANVAS_HEIGHT),
+    layoutRows: 1,
+    layoutColumns: 1,
+  }));
+  const [scenarioManagerSelectedId, setScenarioManagerSelectedId] = useState("");
   const [storyboardEditorCellId, setStoryboardEditorCellId] = useState("");
+  const [storyboardEditorMode, setStoryboardEditorMode] = useState(STORYBOARD_EDITOR_MODE_GENERATE);
   const [storyboardLibraryPickerOpen, setStoryboardLibraryPickerOpen] = useState(false);
   const [storyboardLibraryPickerPending, setStoryboardLibraryPickerPending] = useState(false);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
@@ -1806,6 +1962,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const storyboardCaptionTextareaRef = useRef(null);
   const storyboardShareCopyResetTimeoutRef = useRef(null);
   const storyboardLibraryPickerTimeoutRef = useRef(null);
+  const resourceManagerOpenTimerRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
   const imagePreviewPointersRef = useRef(new Map());
@@ -1828,20 +1985,53 @@ function BananaStudioApp({ routeMode = "login" }) {
     () => buildStoryboardCellDefinitions(professionalLayoutRows, professionalLayoutColumns),
     [professionalLayoutColumns, professionalLayoutRows],
   );
+  const allCanvasScenarioOptions = useMemo(
+    () => [...CANVAS_SIZE_OPTIONS, ...professionalCustomScenarios],
+    [professionalCustomScenarios],
+  );
   const professionalCanvasSizeOption = useMemo(
     () =>
       getCanvasSizeOption(
         professionalCanvasSize,
         professionalCustomCanvasWidth,
         professionalCustomCanvasHeight,
+        professionalCustomScenarios,
+        professionalLayoutRows,
+        professionalLayoutColumns,
       ),
-    [professionalCanvasSize, professionalCustomCanvasHeight, professionalCustomCanvasWidth],
+    [
+      professionalCanvasSize,
+      professionalCustomCanvasHeight,
+      professionalCustomCanvasWidth,
+      professionalCustomScenarios,
+      professionalLayoutColumns,
+      professionalLayoutRows,
+    ],
   );
   const professionalStyleReference = referenceImages[0] || null;
+  const activeCustomScenario = useMemo(
+    () =>
+      professionalCustomScenarios.find((scenario) => scenario.value === professionalCanvasSize) || null,
+    [professionalCanvasSize, professionalCustomScenarios],
+  );
+  const activeSystemScenario = useMemo(
+    () => CANVAS_SIZE_OPTIONS.find((scenario) => scenario.value === professionalCanvasSize) || null,
+    [professionalCanvasSize],
+  );
   const storyboardEditorOpen = Boolean(storyboardEditorCellId);
   const storyboardEditorCell = storyboardEditorCellId
     ? storyboardCells[storyboardEditorCellId] || null
     : null;
+  const isStoryboardEditorGenerateMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_GENERATE;
+  const isStoryboardEditorAssetMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET;
+
+  useEffect(() => {
+    return () => {
+      if (resourceManagerOpenTimerRef.current) {
+        window.clearTimeout(resourceManagerOpenTimerRef.current);
+      }
+    };
+  }, []);
   const storyboardCaptionFontScale = professionalStoryboardCaptionFontSizePercent / 100;
   const storyboardCaptionBackgroundAlpha =
     professionalStoryboardCaptionBackgroundAlphaPercent / 100;
@@ -2296,7 +2486,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       "",
       "参数",
       `底模：${selectedModel?.name || professionalSelectedModelId || "未选择"}`,
-      `画板尺寸：${professionalCanvasSizeOption.label}`,
+      `常用场景：${professionalCanvasSizeOption.label}`,
       `分镜布局：${professionalLayoutRows} 行 × ${professionalLayoutColumns} 列`,
       `图片比例：${professionalStoryboardAspectRatioValue}`,
       `分辨率：${professionalStoryboardImageSizeValue}`,
@@ -2304,7 +2494,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       `配文字号：${professionalStoryboardCaptionFontSizePercent}%`,
       `整体画风参考图：${professionalStyleReference?.name || "未设置"}`,
       "",
-      "整体提示词",
+      "全局提示词与画风参考图",
       normalizeTextValue(professionalGlobalPrompt) || "未填写",
       "",
       "分镜提示词",
@@ -2455,15 +2645,25 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   useEffect(() => {
     if (
-      !SUPPORTED_CANVAS_SIZE_VALUES.has(professionalCanvasSize) &&
-      professionalCanvasSize !== CUSTOM_CANVAS_SIZE_VALUE
+      normalizeCanvasScenarioValue(
+        professionalCanvasSize,
+        professionalCustomScenarios,
+      ) !== professionalCanvasSize
     ) {
-      setProfessionalCanvasSize("poster-a4-portrait");
+      setProfessionalCanvasSize(CANVAS_SIZE_OPTIONS[0].value);
       return;
     }
 
     writeLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY, professionalCanvasSize);
-  }, [professionalCanvasSize]);
+  }, [professionalCanvasSize, professionalCustomScenarios]);
+
+  useEffect(() => {
+    const persistedValue = buildPersistedProfessionalCustomScenarios(professionalCustomScenarios);
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY,
+      persistedValue.length > 0 ? JSON.stringify(persistedValue) : "",
+    );
+  }, [professionalCustomScenarios]);
 
   useEffect(() => {
     writeLocalValue(
@@ -2631,6 +2831,19 @@ function BananaStudioApp({ routeMode = "login" }) {
       storyboardLibraryPickerTimeoutRef.current = null;
     }
   }, [storyboardEditorCellId]);
+
+  useEffect(() => {
+    if (storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET) {
+      return;
+    }
+
+    setStoryboardLibraryPickerOpen(false);
+    setStoryboardLibraryPickerPending(false);
+    if (storyboardLibraryPickerTimeoutRef.current) {
+      window.clearTimeout(storyboardLibraryPickerTimeoutRef.current);
+      storyboardLibraryPickerTimeoutRef.current = null;
+    }
+  }, [storyboardEditorMode]);
 
   useEffect(() => {
     return () => {
@@ -2805,11 +3018,6 @@ function BananaStudioApp({ routeMode = "login" }) {
 
         if (storyboardClearConfirmOpen) {
           closeStoryboardClearConfirm();
-          return;
-        }
-
-        if (storyboardEditorOpen) {
-          closeStoryboardEditor();
           return;
         }
 
@@ -3239,6 +3447,176 @@ function BananaStudioApp({ routeMode = "login" }) {
     void writeLastGenerationRecordId(record.id);
   }
 
+  function handleProfessionalScenarioChange(value) {
+    const scenario = getCanvasScenarioOption(value, professionalCustomScenarios);
+
+    setProfessionalCanvasSize(scenario.value);
+    setProfessionalLayoutRows(clampLayoutTrack(scenario.layoutRows));
+    setProfessionalLayoutColumns(clampLayoutTrack(scenario.layoutColumns));
+  }
+
+  function buildScenarioManagerDraft(sourceScenario = null) {
+    return {
+      value: sourceScenario?.value || "",
+      label: sourceScenario?.label || "我的场景",
+      width: String(
+        normalizeCanvasDimensionValue(
+          sourceScenario?.width,
+          professionalCanvasSizeOption.width || DEFAULT_CUSTOM_CANVAS_WIDTH,
+        ),
+      ),
+      height: String(
+        normalizeCanvasDimensionValue(
+          sourceScenario?.height,
+          professionalCanvasSizeOption.height || DEFAULT_CUSTOM_CANVAS_HEIGHT,
+        ),
+      ),
+      layoutRows: clampLayoutTrack(
+        sourceScenario?.layoutRows || professionalLayoutRows || 1,
+      ),
+      layoutColumns: clampLayoutTrack(
+        sourceScenario?.layoutColumns || professionalLayoutColumns || 1,
+      ),
+    };
+  }
+
+  function openScenarioManager() {
+    if (activeCustomScenario) {
+      setScenarioManagerSelectedType("custom");
+      setScenarioManagerSelectedId(activeCustomScenario.value);
+      setScenarioManagerDraft(buildScenarioManagerDraft(activeCustomScenario));
+      setScenarioManagerOpen(true);
+      return;
+    }
+
+    if (activeSystemScenario) {
+      setScenarioManagerSelectedType("system");
+      setScenarioManagerSelectedId(activeSystemScenario.value);
+      setScenarioManagerDraft(buildScenarioManagerDraft(activeSystemScenario));
+      setScenarioManagerOpen(true);
+      return;
+    }
+
+    setScenarioManagerSelectedType("new");
+    setScenarioManagerSelectedId("");
+    setScenarioManagerDraft(buildScenarioManagerDraft());
+    setScenarioManagerOpen(true);
+  }
+
+  function closeScenarioManager() {
+    setScenarioManagerOpen(false);
+  }
+
+  function handleScenarioManagerSelect(value) {
+    const scenario = professionalCustomScenarios.find((item) => item.value === value);
+
+    if (!scenario) {
+      return;
+    }
+
+    setScenarioManagerSelectedType("custom");
+    setScenarioManagerSelectedId(scenario.value);
+    setScenarioManagerDraft(buildScenarioManagerDraft(scenario));
+  }
+
+  function handleScenarioManagerSelectSystem(value) {
+    const scenario = CANVAS_SIZE_OPTIONS.find((item) => item.value === value);
+
+    if (!scenario) {
+      return;
+    }
+
+    setScenarioManagerSelectedType("system");
+    setScenarioManagerSelectedId(scenario.value);
+    setScenarioManagerDraft(buildScenarioManagerDraft(scenario));
+  }
+
+  function handleScenarioManagerCreate() {
+    setScenarioManagerSelectedType("new");
+    setScenarioManagerSelectedId("");
+    setScenarioManagerDraft(buildScenarioManagerDraft());
+  }
+
+  function handleScenarioManagerDraftLabelChange(value) {
+    setScenarioManagerDraft((currentValue) => ({
+      ...currentValue,
+      label: value,
+    }));
+  }
+
+  function handleScenarioManagerDraftDimensionChange(field, value) {
+    setScenarioManagerDraft((currentValue) => ({
+      ...currentValue,
+      [field]: value,
+    }));
+  }
+
+  function handleScenarioManagerDraftLayoutChange(field, value) {
+    setScenarioManagerDraft((currentValue) => ({
+      ...currentValue,
+      [field]: clampLayoutTrack(value),
+    }));
+  }
+
+  function handleScenarioManagerSave() {
+    const label = normalizeTextValue(scenarioManagerDraft.label);
+
+    if (!label) {
+      setStudioError("请先填写常用场景名称");
+      return;
+    }
+
+    const nextScenario = {
+      value: scenarioManagerSelectedId || `custom-scene-${createPersistedRecordId()}`,
+      label,
+      width: normalizeCanvasDimensionValue(
+        scenarioManagerDraft.width,
+        DEFAULT_CUSTOM_CANVAS_WIDTH,
+      ),
+      height: normalizeCanvasDimensionValue(
+        scenarioManagerDraft.height,
+        DEFAULT_CUSTOM_CANVAS_HEIGHT,
+      ),
+      layoutRows: clampLayoutTrack(scenarioManagerDraft.layoutRows),
+      layoutColumns: clampLayoutTrack(scenarioManagerDraft.layoutColumns),
+    };
+
+    setProfessionalCustomScenarios((currentValue) => {
+      const nextValue = currentValue.some((item) => item.value === nextScenario.value)
+        ? currentValue.map((item) => (item.value === nextScenario.value ? nextScenario : item))
+        : [...currentValue, nextScenario];
+
+      return nextValue;
+    });
+
+    setScenarioManagerSelectedId(nextScenario.value);
+    setScenarioManagerSelectedType("custom");
+    setScenarioManagerDraft(buildScenarioManagerDraft(nextScenario));
+    setProfessionalCanvasSize(nextScenario.value);
+    setProfessionalLayoutRows(nextScenario.layoutRows);
+    setProfessionalLayoutColumns(nextScenario.layoutColumns);
+    setStudioError("");
+  }
+
+  function handleScenarioManagerDelete(value) {
+    if (!value) {
+      return;
+    }
+
+    setProfessionalCustomScenarios((currentValue) =>
+      currentValue.filter((scenario) => scenario.value !== value),
+    );
+
+    if (professionalCanvasSize === value) {
+      handleProfessionalScenarioChange(CANVAS_SIZE_OPTIONS[0].value);
+    }
+
+    setScenarioManagerSelectedId("");
+    setScenarioManagerSelectedType("new");
+    setScenarioManagerDraft(buildScenarioManagerDraft());
+    setStudioError("");
+  }
+
   async function handleDeleteStoredRecord(recordId) {
     const nextLibraryRecords = generationLibrary.filter((record) => record.id !== recordId);
     const nextBatchResults = generationResults.some((record) => record.id === recordId)
@@ -3315,11 +3693,17 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
+    setStoryboardEditorMode(
+      cell.record && !normalizeTextValue(cell.prompt)
+        ? STORYBOARD_EDITOR_MODE_ASSET
+        : STORYBOARD_EDITOR_MODE_GENERATE,
+    );
     setStoryboardEditorCellId(cellId);
   }
 
   function closeStoryboardEditor() {
     setStoryboardEditorCellId("");
+    setStoryboardEditorMode(STORYBOARD_EDITOR_MODE_GENERATE);
   }
 
   function navigateStoryboardEditor(direction) {
@@ -3379,6 +3763,54 @@ function BananaStudioApp({ routeMode = "login" }) {
     }));
   }
 
+  async function handleStoryboardLocalImageFileChange(event) {
+    const files = Array.from(event.target.files || []);
+
+    if (files.length === 0 || !storyboardEditorCellId) {
+      return;
+    }
+
+    try {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      const nextFile = imageFiles[0];
+
+      if (!nextFile) {
+        updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+          ...cell,
+          error: "请上传 1 张图片作为当前格子的图片",
+        }));
+        return;
+      }
+
+      const record = await readFileAsGenerationResultRecord(nextFile);
+
+      if (!record) {
+        updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+          ...cell,
+          error: "当前图片导入失败",
+        }));
+        return;
+      }
+
+      updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+        ...cell,
+        status: "success",
+        statusText: "已导入本地图片，仅作用于当前格子",
+        error: "",
+        record,
+      }));
+      setStoryboardLibraryPickerOpen(false);
+      setStudioError("");
+    } catch (error) {
+      updateStoryboardCell(storyboardEditorCellId, (cell) => ({
+        ...cell,
+        error: error instanceof Error ? error.message : "本地图片读取失败",
+      }));
+    } finally {
+      event.target.value = "";
+    }
+  }
+
   function handleSelectStoryboardLibraryRecord(record) {
     if (!storyboardEditorCellId) {
       return;
@@ -3393,7 +3825,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     updateStoryboardCell(storyboardEditorCellId, (cell) => ({
       ...cell,
       status: "success",
-      statusText: "已复用资源管理器中的图片",
+      statusText: "已复用资源管理器中的图片，仅作用于当前格子",
       error: "",
       record: clonedRecord,
     }));
@@ -3758,7 +4190,21 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function openResourceManager() {
-    setResourceManagerOpen(true);
+    if (resourceManagerOpen || resourceManagerPending) {
+      return;
+    }
+
+    setResourceManagerPending(true);
+
+    if (resourceManagerOpenTimerRef.current) {
+      window.clearTimeout(resourceManagerOpenTimerRef.current);
+    }
+
+    resourceManagerOpenTimerRef.current = window.setTimeout(() => {
+      resourceManagerOpenTimerRef.current = null;
+      setResourceManagerOpen(true);
+      setResourceManagerPending(false);
+    }, 0);
   }
 
   function handlePreviewStoredRecord(record) {
@@ -4018,20 +4464,19 @@ function BananaStudioApp({ routeMode = "login" }) {
       <div className="page-shell">
         <main className="gate-layout">
           <section className="gate-hero">
-            <p className="eyebrow">BANANA SHARE</p>
-            <h1>输入提取码，进入香蕉生图空间</h1>
-            <p className="hero-copy">
-              支持从链接里的 <code>pw</code> 参数自动带入提取码。
-              校验通过后，前端会进入 banana Studio，后端再代理 Gemini 生图能力。
-            </p>
-            <div className="hero-tags">
-              <span>提取码验证</span>
-              <span>多图参考</span>
-              <span>Gemini 生图</span>
-            </div>
+            <img
+              className="gate-hero-image"
+              src="/bg/002.png"
+              alt="Banana Studio 展示图"
+            />
           </section>
 
           <section className="gate-panel">
+            <img
+              className="gate-panel-logo"
+              src="/logo.png"
+              alt="Banana Studio logo"
+            />
             <form className="gate-form" onSubmit={handleVerifySubmit}>
               <label htmlFor="password">提取码</label>
               <input
@@ -4062,35 +4507,41 @@ function BananaStudioApp({ routeMode = "login" }) {
   return (
     <div className="page-shell studio-shell">
       <header className="studio-topbar">
-        <div>
-          <h1>BANANA STUDIO</h1>
+        <div className="studio-brand">
+          <img className="studio-brand-logo" src="/logo.png" alt="Banana Studio" />
         </div>
         <div className="topbar-actions">
           <button
             type="button"
-            className="resource-manager-trigger"
+            className={`resource-manager-trigger${resourceManagerPending ? " is-pending" : ""}`}
             onClick={openResourceManager}
-            aria-label="打开资源管理器"
-            title="资源管理器"
+            aria-label={resourceManagerPending ? "资源管理器加载中" : "打开资源管理器"}
+            aria-busy={resourceManagerPending ? "true" : undefined}
+            title={resourceManagerPending ? "资源管理器加载中" : "资源管理器"}
+            disabled={resourceManagerPending}
           >
             <span className="sr-only">资源管理器</span>
-            <svg
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <rect width="8" height="18" x="3" y="3" rx="1" />
-              <path d="M7 3v18" />
-              <path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" />
-            </svg>
+            {resourceManagerPending ? (
+              <span className="resource-manager-trigger-spinner" aria-hidden="true" />
+            ) : (
+              <svg
+                viewBox="0 0 24 24"
+                width="20"
+                height="20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect width="8" height="18" x="3" y="3" rx="1" />
+                <path d="M7 3v18" />
+                <path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" />
+              </svg>
+            )}
             <span className="resource-manager-trigger-label" aria-hidden="true">
-              库
+              {resourceManagerPending ? "加载中" : "库"}
             </span>
           </button>
         </div>
@@ -4199,7 +4650,51 @@ function BananaStudioApp({ routeMode = "login" }) {
                     <span className="result-chip">
                       {professionalCanvasSizeOption.label} · {professionalLayoutRows} 行 × {professionalLayoutColumns} 列
                     </span>
-                    <div className="result-toolbar-actions">
+                    <div className="result-toolbar-actions professional-export-toolbar-actions">
+                      <button
+                        type="button"
+                        className={`ghost-button storyboard-share-button${storyboardShareCopyState === "success" ? " is-success" : storyboardShareCopyState === "error" ? " is-error" : ""}`}
+                        onClick={handleCopyStoryboardShare}
+                        disabled={!storyboardShareText}
+                        aria-label={
+                          storyboardShareCopyState === "success"
+                            ? "已复制分享"
+                            : storyboardShareCopyState === "error"
+                              ? "复制失败"
+                              : "复制分享"
+                        }
+                        title={
+                          storyboardShareCopyState === "success"
+                            ? "已复制分享"
+                            : storyboardShareCopyState === "error"
+                              ? "复制失败"
+                              : "复制分享"
+                        }
+                      >
+                        {storyboardShareCopyState === "success" ? (
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="m4.5 10.5 3.2 3.2 7.8-7.8" />
+                          </svg>
+                        ) : storyboardShareCopyState === "error" ? (
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M10 5.2v5.8" />
+                            <path d="M10 14.4h.01" />
+                            <path d="M10 17.2a7.2 7.2 0 1 0 0-14.4 7.2 7.2 0 0 0 0 14.4Z" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M7 6.2V5.1c0-.9.7-1.6 1.6-1.6h6.3c.9 0 1.6.7 1.6 1.6v8.3c0 .9-.7 1.6-1.6 1.6H13" />
+                            <path d="M5.1 6.4h6.3c.9 0 1.6.7 1.6 1.6v6.9c0 .9-.7 1.6-1.6 1.6H5.1c-.9 0-1.6-.7-1.6-1.6V8c0-.9.7-1.6 1.6-1.6Z" />
+                          </svg>
+                        )}
+                        <span className="sr-only">
+                          {storyboardShareCopyState === "success"
+                            ? "已复制分享"
+                            : storyboardShareCopyState === "error"
+                              ? "复制失败"
+                              : "复制分享"}
+                        </span>
+                      </button>
                       <button
                         type="button"
                         className="primary-button professional-export-download-button"
@@ -4213,7 +4708,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
                   {normalizeTextValue(professionalGlobalPrompt) ? (
                     <p className="professional-export-global-prompt">
-                      整体提示词：{normalizeTextValue(professionalGlobalPrompt)}
+                      全局提示词与画风参考图：{normalizeTextValue(professionalGlobalPrompt)}
                     </p>
                   ) : null}
                   <div className="professional-export-stage">
@@ -4318,59 +4813,43 @@ function BananaStudioApp({ routeMode = "login" }) {
 
             {showProfessionalPanelControls ? (
               <>
-                <div className="professional-top-actions">
-                  <button
-                    type="button"
-                    className={`ghost-button storyboard-share-button${storyboardShareCopyState === "success" ? " is-success" : storyboardShareCopyState === "error" ? " is-error" : ""}`}
-                    onClick={handleCopyStoryboardShare}
-                    disabled={!storyboardShareText}
-                  >
-                    {storyboardShareCopyState === "success"
-                      ? "已复制分享"
-                      : storyboardShareCopyState === "error"
-                        ? "复制失败"
-                        : "复制分享"}
-                  </button>
-                </div>
-
-                <label className="field-label field-label-inline" htmlFor="bananaModelSelector">
-                  <span>底模选择</span>
-                  {selectedModel ? (
-                    <small className="model-helper-text">{selectedModel.description}</small>
-                  ) : null}
-                </label>
-                <select
-                  id="bananaModelSelector"
-                  name="bananaModelSelector"
-                  className="model-selector"
-                  value={professionalSelectedModelId}
-                  onChange={(event) => setProfessionalSelectedModelId(event.target.value)}
-                >
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name} · {model.priceLabel}
-                    </option>
-                  ))}
-                </select>
-
                 <div className="layout-config-card">
                   <div className="layout-control-row">
-                    <label className="image-option-field layout-select-field" htmlFor="canvasSizeSelector">
-                      <span className="field-label">画板尺寸</span>
-                      <select
-                        id="canvasSizeSelector"
-                        name="canvasSizeSelector"
-                        className="model-selector compact-selector"
-                        value={professionalCanvasSize}
-                        onChange={(event) => setProfessionalCanvasSize(event.target.value)}
-                      >
-                        {CANVAS_SIZE_SELECT_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="image-option-field layout-select-field canvas-size-full-row-field">
+                      <label className="field-label" htmlFor="canvasSizeSelector">
+                        常用场景
+                      </label>
+                      <div className="scenario-select-row">
+                        <select
+                          id="canvasSizeSelector"
+                          name="canvasSizeSelector"
+                          className="model-selector compact-selector scenario-compact-selector"
+                          value={professionalCanvasSize}
+                          onChange={(event) => handleProfessionalScenarioChange(event.target.value)}
+                        >
+                          {allCanvasScenarioOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="ghost-button scenario-manager-trigger"
+                          onClick={openScenarioManager}
+                          aria-label="打开常用场景管理面板"
+                          title="管理常用场景"
+                        >
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M4.5 5.5h11" />
+                            <path d="M4.5 10h11" />
+                            <path d="M4.5 14.5h11" />
+                            <path d="M7 4.5v11" />
+                            <path d="M13 4.5v11" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
 
                     {isSimplePanelMode ? (
                       <label className="image-option-field image-count-field" htmlFor="imageCountSelector">
@@ -4395,112 +4874,23 @@ function BananaStudioApp({ routeMode = "login" }) {
                       </label>
                     ) : null}
 
-                    <label className="image-option-field layout-track-field" htmlFor="layoutRows">
-                      <span className="field-label">行数</span>
-                      <select
-                        id="layoutRows"
-                        name="layoutRows"
-                        className="model-selector compact-selector"
-                        value={professionalLayoutRows}
-                        onChange={(event) =>
-                          setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
-                        }
-                      >
-                        {LAYOUT_TRACK_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="image-option-field layout-track-field" htmlFor="layoutColumns">
-                      <span className="field-label">列数</span>
-                      <select
-                        id="layoutColumns"
-                        name="layoutColumns"
-                        className="model-selector compact-selector"
-                        value={professionalLayoutColumns}
-                        onChange={(event) =>
-                          setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
-                        }
-                      >
-                        {LAYOUT_TRACK_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
                   </div>
-
-                  {professionalCanvasSize === CUSTOM_CANVAS_SIZE_VALUE ? (
-                    <div className="canvas-custom-size-row">
-                      <label className="image-option-field canvas-custom-size-field" htmlFor="customCanvasWidth">
-                        <span className="field-label">宽度 px</span>
-                        <input
-                          id="customCanvasWidth"
-                          name="customCanvasWidth"
-                          type="number"
-                          min="64"
-                          max="10000"
-                          step="1"
-                          inputMode="numeric"
-                          value={professionalCustomCanvasWidth}
-                          onChange={(event) =>
-                            setProfessionalCustomCanvasWidth(
-                              normalizeCanvasDimensionValue(
-                                event.target.value,
-                                professionalCustomCanvasWidth,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
-
-                      <label className="image-option-field canvas-custom-size-field" htmlFor="customCanvasHeight">
-                        <span className="field-label">高度 px</span>
-                        <input
-                          id="customCanvasHeight"
-                          name="customCanvasHeight"
-                          type="number"
-                          min="64"
-                          max="10000"
-                          step="1"
-                          inputMode="numeric"
-                          value={professionalCustomCanvasHeight}
-                          onChange={(event) =>
-                            setProfessionalCustomCanvasHeight(
-                              normalizeCanvasDimensionValue(
-                                event.target.value,
-                                professionalCustomCanvasHeight,
-                              ),
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                  ) : null}
 
                   <div className="professional-storyboard-global-panel">
                     <label className="field-label" htmlFor="professionalGlobalPrompt">
-                      整体提示词
+                      全局提示词与画风参考图
                     </label>
                     <textarea
+                      className="professional-global-prompt-textarea"
                       id="professionalGlobalPrompt"
                       name="professionalGlobalPrompt"
-                      rows={4}
+                      rows={2}
                       value={professionalGlobalPrompt}
                       onChange={(event) => setProfessionalGlobalPrompt(event.target.value)}
                       placeholder="补充所有分镜共享的人物设定、画风、服装一致性、镜头语言和整体氛围"
                     />
 
                     <div className="professional-style-reference-panel">
-                      <div className="section-title-inline">
-                        <strong>整体画风参考图</strong>
-                        <span>上传 1 张图片，作为所有分镜图片的统一画风参考。</span>
-                      </div>
-
                       {professionalStyleReference ? (
                         <div className="professional-style-reference-card">
                           <div className="professional-style-reference-media">
@@ -4647,7 +5037,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     >
                       <span>图片设置</span>
                       <span className="storyboard-style-toggle-meta">
-                        比例 {professionalStoryboardAspectRatioValue} · 分辨率 {professionalStoryboardImageSizeValue}
+                        底模 {selectedModel?.name || professionalSelectedModelId || "未选择"} · 比例 {professionalStoryboardAspectRatioValue} · 分辨率 {professionalStoryboardImageSizeValue}
                       </span>
                       <span className="storyboard-style-toggle-icon" aria-hidden="true">
                         ▾
@@ -4660,6 +5050,29 @@ function BananaStudioApp({ routeMode = "login" }) {
                         className="layout-preview-controls storyboard-style-controls-panel"
                         aria-label="分镜表格图片设置"
                       >
+                        <label
+                          className="image-option-field storyboard-model-field"
+                          htmlFor="bananaModelSelector"
+                        >
+                          <span className="field-label">底模选择</span>
+                          <select
+                            id="bananaModelSelector"
+                            name="bananaModelSelector"
+                            className="model-selector compact-selector"
+                            value={professionalSelectedModelId}
+                            onChange={(event) => setProfessionalSelectedModelId(event.target.value)}
+                          >
+                            {models.map((model) => (
+                              <option key={model.id} value={model.id}>
+                                {model.name} · {model.priceLabel}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedModel ? (
+                            <small className="model-helper-text">{selectedModel.description}</small>
+                          ) : null}
+                        </label>
+
                         <label
                           className="image-option-field"
                           htmlFor="storyboardGlobalAspectRatio"
@@ -4723,7 +5136,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     >
                       <span>表格样式设置</span>
                       <span className="storyboard-style-toggle-meta">
-                        分割线 {professionalStoryboardDividerWidthPx}px · 配文字号 {professionalStoryboardCaptionFontSizePercent}%
+                        布局 {professionalLayoutRows} × {professionalLayoutColumns} · 分割线 {professionalStoryboardDividerWidthPx}px · 配文字号 {professionalStoryboardCaptionFontSizePercent}%
                       </span>
                       <span className="storyboard-style-toggle-icon" aria-hidden="true">
                         ▾
@@ -4736,6 +5149,43 @@ function BananaStudioApp({ routeMode = "login" }) {
                         className="layout-preview-controls storyboard-style-controls-panel"
                         aria-label="分镜表格样式设置"
                       >
+                        <label className="image-option-field layout-track-field" htmlFor="layoutRows">
+                          <span className="field-label">行数</span>
+                          <select
+                            id="layoutRows"
+                            name="layoutRows"
+                            className="model-selector compact-selector"
+                            value={professionalLayoutRows}
+                            onChange={(event) =>
+                              setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
+                            }
+                          >
+                            {LAYOUT_TRACK_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="image-option-field layout-track-field" htmlFor="layoutColumns">
+                          <span className="field-label">列数</span>
+                          <select
+                            id="layoutColumns"
+                            name="layoutColumns"
+                            className="model-selector compact-selector"
+                            value={professionalLayoutColumns}
+                            onChange={(event) =>
+                              setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
+                            }
+                          >
+                            {LAYOUT_TRACK_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
 
                         <label
                           className="image-option-field compact-range-field"
@@ -4810,38 +5260,282 @@ function BananaStudioApp({ routeMode = "login" }) {
           </form>
         </section>
       </main>
+      {scenarioManagerOpen ? (
+        <div
+          className="scenario-manager-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="常用场景管理"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeScenarioManager();
+            }
+          }}
+        >
+          <section className="scenario-manager-panel">
+            <div className="scenario-manager-windowbar">
+              <span className="finder-window-spacer" aria-hidden="true" />
+              <strong>常用场景管理</strong>
+              <button
+                type="button"
+                className="finder-close-button"
+                onClick={closeScenarioManager}
+                aria-label="关闭常用场景管理"
+                title="关闭"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 5l10 10" />
+                  <path d="M15 5L5 15" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="scenario-manager-layout">
+              <aside className="scenario-manager-sidebar">
+                <div className="scenario-manager-section">
+                  <div className="section-title-inline">
+                    <strong>系统场景</strong>
+                    <span>内置预设可直接使用，不支持删除。</span>
+                  </div>
+                  <div className="scenario-manager-list">
+                    {CANVAS_SIZE_OPTIONS.map((scenario) => (
+                      <button
+                        key={scenario.value}
+                        type="button"
+                        className={`scenario-manager-item scenario-manager-item-button${scenarioManagerSelectedType === "system" && scenarioManagerSelectedId === scenario.value ? " is-active" : ""}`}
+                        onClick={() => handleScenarioManagerSelectSystem(scenario.value)}
+                      >
+                        <span className="scenario-manager-item-copy">
+                          <strong>{scenario.label}</strong>
+                          <span>
+                            {scenario.layoutRows} 行 × {scenario.layoutColumns} 列
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="scenario-manager-section">
+                  <div className="scenario-manager-section-header">
+                    <div className="section-title-inline">
+                      <strong>自定义场景</strong>
+                      <span>支持新增、修改、删除，保存后会出现在下拉里。</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost-button scenario-manager-add-button"
+                      onClick={handleScenarioManagerCreate}
+                    >
+                      新建
+                    </button>
+                  </div>
+
+                  {professionalCustomScenarios.length > 0 ? (
+                    <div className="scenario-manager-list">
+                      {professionalCustomScenarios.map((scenario) => (
+                        <button
+                          key={scenario.value}
+                          type="button"
+                          className={`scenario-manager-item scenario-manager-item-button${scenarioManagerSelectedId === scenario.value ? " is-active" : ""}`}
+                          onClick={() => handleScenarioManagerSelect(scenario.value)}
+                        >
+                          <span className="scenario-manager-item-copy">
+                            <strong>{scenario.label}</strong>
+                            <span>
+                              {scenario.width} × {scenario.height} · {scenario.layoutRows} 行 × {scenario.layoutColumns} 列
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="empty-state scenario-manager-empty-state">
+                      <p>还没有自定义场景。</p>
+                      <small>点右上角“新建”即可创建一个可复用场景。</small>
+                    </div>
+                  )}
+                </div>
+              </aside>
+
+              <section className="scenario-manager-editor">
+                <div className="section-title-inline">
+                  <strong>
+                    {scenarioManagerSelectedType === "system"
+                      ? "查看系统场景"
+                      : scenarioManagerSelectedId
+                        ? "编辑自定义场景"
+                        : "新建自定义场景"}
+                  </strong>
+                  <span>
+                    {scenarioManagerSelectedType === "system"
+                      ? "系统场景仅支持查看和使用，不支持修改或删除。"
+                      : "场景会同时保存画板尺寸、行、列设置。"}
+                  </span>
+                </div>
+
+                {scenarioManagerSelectedType === "system" ? (
+                  <>
+                    <div className="scenario-manager-preview">
+                      <strong>{scenarioManagerDraft.label}</strong>
+                      <span>
+                        {scenarioManagerDraft.width} × {scenarioManagerDraft.height} · {scenarioManagerDraft.layoutRows} 行 × {scenarioManagerDraft.layoutColumns} 列
+                      </span>
+                    </div>
+
+                    <div className="scenario-manager-actions">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={closeScenarioManager}
+                      >
+                        关闭
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => {
+                          handleProfessionalScenarioChange(scenarioManagerSelectedId);
+                          closeScenarioManager();
+                        }}
+                      >
+                        使用这个场景
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <label className="image-option-field" htmlFor="scenarioManagerLabel">
+                      <span className="field-label">场景名称</span>
+                      <input
+                        id="scenarioManagerLabel"
+                        name="scenarioManagerLabel"
+                        type="text"
+                        value={scenarioManagerDraft.label}
+                        onChange={(event) => handleScenarioManagerDraftLabelChange(event.target.value)}
+                        placeholder="例如：四宫格故事封面"
+                      />
+                    </label>
+
+                    <div className="scenario-manager-form-grid">
+                      <label className="image-option-field" htmlFor="scenarioManagerWidth">
+                        <span className="field-label">宽度 px</span>
+                        <input
+                          id="scenarioManagerWidth"
+                          name="scenarioManagerWidth"
+                          type="number"
+                          step="1"
+                          inputMode="numeric"
+                          value={scenarioManagerDraft.width}
+                          onChange={(event) =>
+                            handleScenarioManagerDraftDimensionChange("width", event.target.value)
+                          }
+                        />
+                      </label>
+
+                      <label className="image-option-field" htmlFor="scenarioManagerHeight">
+                        <span className="field-label">高度 px</span>
+                        <input
+                          id="scenarioManagerHeight"
+                          name="scenarioManagerHeight"
+                          type="number"
+                          step="1"
+                          inputMode="numeric"
+                          value={scenarioManagerDraft.height}
+                          onChange={(event) =>
+                            handleScenarioManagerDraftDimensionChange("height", event.target.value)
+                          }
+                        />
+                      </label>
+
+                      <label className="image-option-field" htmlFor="scenarioManagerRows">
+                        <span className="field-label">行</span>
+                        <select
+                          id="scenarioManagerRows"
+                          name="scenarioManagerRows"
+                          className="model-selector compact-selector"
+                          value={scenarioManagerDraft.layoutRows}
+                          onChange={(event) =>
+                            handleScenarioManagerDraftLayoutChange("layoutRows", event.target.value)
+                          }
+                        >
+                          {LAYOUT_TRACK_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="image-option-field" htmlFor="scenarioManagerColumns">
+                        <span className="field-label">列</span>
+                        <select
+                          id="scenarioManagerColumns"
+                          name="scenarioManagerColumns"
+                          className="model-selector compact-selector"
+                          value={scenarioManagerDraft.layoutColumns}
+                          onChange={(event) =>
+                            handleScenarioManagerDraftLayoutChange("layoutColumns", event.target.value)
+                          }
+                        >
+                          {LAYOUT_TRACK_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="scenario-manager-preview">
+                      <strong>预览</strong>
+                      <span>
+                        {scenarioManagerDraft.width} × {scenarioManagerDraft.height} · {scenarioManagerDraft.layoutRows} 行 × {scenarioManagerDraft.layoutColumns} 列
+                      </span>
+                    </div>
+
+                    <div className="scenario-manager-actions">
+                      {scenarioManagerSelectedId ? (
+                        <button
+                          type="button"
+                          className="ghost-button scenario-manager-delete-button"
+                          onClick={() => handleScenarioManagerDelete(scenarioManagerSelectedId)}
+                        >
+                          删除
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={closeScenarioManager}
+                      >
+                        关闭
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={handleScenarioManagerSave}
+                      >
+                        {scenarioManagerSelectedId ? "保存修改" : "保存场景"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {storyboardEditorOpen && storyboardEditorCell ? (
         <div
           className="storyboard-editor-overlay"
           role="dialog"
           aria-modal="true"
           aria-label={`${storyboardEditorCell.label} 输入面板`}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) {
-              closeStoryboardEditor();
-            }
-          }}
         >
           <section className="storyboard-editor-panel">
             <div className="storyboard-editor-windowbar">
-              <div className="storyboard-editor-nav" aria-label="切换分镜格子">
-                <button
-                  type="button"
-                  className="ghost-button storyboard-editor-nav-button"
-                  onClick={() => navigateStoryboardEditor("previous")}
-                  disabled={!previousStoryboardEditorCell}
-                >
-                  向前一格
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button storyboard-editor-nav-button"
-                  onClick={() => navigateStoryboardEditor("next")}
-                  disabled={!nextStoryboardEditorCell}
-                >
-                  向后一格
-                </button>
-              </div>
+              <span className="storyboard-editor-windowbar-spacer" aria-hidden="true" />
               <strong>
                 {storyboardEditorCell.label} · 行 {storyboardEditorCell.row} / 列 {storyboardEditorCell.column}
               </strong>
@@ -4859,97 +5553,203 @@ function BananaStudioApp({ routeMode = "login" }) {
               </button>
             </div>
 
+            <div className="storyboard-editor-mode-row">
+              <div className="storyboard-editor-mode-switcher" role="tablist" aria-label="当前格子编辑模式">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={isStoryboardEditorGenerateMode}
+                  className={`storyboard-editor-mode-button${isStoryboardEditorGenerateMode ? " is-active" : ""}`}
+                  onClick={() => setStoryboardEditorMode(STORYBOARD_EDITOR_MODE_GENERATE)}
+                >
+                  传统生图
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={isStoryboardEditorAssetMode}
+                  className={`storyboard-editor-mode-button${isStoryboardEditorAssetMode ? " is-active" : ""}`}
+                  onClick={() => setStoryboardEditorMode(STORYBOARD_EDITOR_MODE_ASSET)}
+                >
+                  选择图片
+                </button>
+              </div>
+            </div>
+
             <div className="storyboard-editor-layout has-preview">
               <div className="storyboard-editor-form">
-                <label className="field-label" htmlFor="storyboardCellPrompt">
-                  这个格子的提示词
-                </label>
-                <textarea
-                  id="storyboardCellPrompt"
-                  name="storyboardCellPrompt"
-                  rows={8}
-                  value={storyboardEditorCell.prompt}
-                  onChange={(event) => handleStoryboardPromptChange(event.target.value)}
-                  placeholder="描述这个格子的主体、镜头、动作、光线、材质和氛围"
-                />
-                <div className="storyboard-reference-panel">
-                  <div className="storyboard-reference-panel-header">
-                    <div className="section-title-inline">
-                      <strong>当前格子的参考图</strong>
-                      <span>只影响这个格子，生成时会继续叠加整体画风参考图。</span>
-                    </div>
-                    {professionalStyleReference ? (
-                      <span className="storyboard-reference-parent-hint">
-                        已继承整体画风参考图
-                      </span>
-                    ) : null}
-                  </div>
+                <p className="storyboard-editor-mode-note">
+                  当前模式只会修改这个格子，不会影响其它格子。
+                </p>
 
-                  {storyboardEditorCell.referenceImages?.[0] ? (
-                    <div className="professional-style-reference-card storyboard-reference-card">
-                      <div className="professional-style-reference-media storyboard-reference-media">
-                        <img
-                          src={storyboardEditorCell.referenceImages[0].previewUrl}
-                          alt={storyboardEditorCell.referenceImages[0].name}
-                          draggable="false"
-                        />
+                {isStoryboardEditorGenerateMode ? (
+                  <>
+                    <label className="field-label" htmlFor="storyboardCellPrompt">
+                      当前格子提示词
+                    </label>
+                    <textarea
+                      className="storyboard-editor-prompt-textarea"
+                      id="storyboardCellPrompt"
+                      name="storyboardCellPrompt"
+                      rows={6}
+                      value={storyboardEditorCell.prompt}
+                      onChange={(event) => handleStoryboardPromptChange(event.target.value)}
+                      placeholder="描述这个格子的主体、镜头、动作、光线、材质和氛围"
+                    />
+                    <div className="storyboard-reference-panel">
+                      <div className="storyboard-reference-panel-header">
+                        <div className="section-title-inline">
+                          <strong>当前格子的参考图</strong>
+                          <span>只影响这个格子，生成时会继续叠加整体画风参考图。</span>
+                        </div>
+                        {professionalStyleReference ? (
+                          <span className="storyboard-reference-parent-hint">
+                            已继承整体画风参考图
+                          </span>
+                        ) : null}
                       </div>
-                      <div className="professional-style-reference-copy">
-                        <strong title={storyboardEditorCell.referenceImages[0].name}>
-                          {storyboardEditorCell.referenceImages[0].name}
-                        </strong>
-                        <span>这张图会作为当前格子的额外参考，不会影响其它格子。</span>
-                      </div>
-                      <div className="professional-style-reference-actions">
-                        <label
-                          className="ghost-button professional-style-reference-action"
-                          aria-label="更换当前格子的参考图"
-                          title="上传新图"
-                        >
-                          <svg viewBox="0 0 20 20" aria-hidden="true">
-                            <path d="M10 13V4.5" />
-                            <path d="m6.8 7.7 3.2-3.2 3.2 3.2" />
-                            <path d="M4.5 14.5v.6c0 .8.6 1.4 1.4 1.4h8.2c.8 0 1.4-.6 1.4-1.4v-.6" />
-                          </svg>
+
+                      {storyboardEditorCell.referenceImages?.[0] ? (
+                        <div className="professional-style-reference-card storyboard-reference-card">
+                          <div className="professional-style-reference-media storyboard-reference-media">
+                            <img
+                              src={storyboardEditorCell.referenceImages[0].previewUrl}
+                              alt={storyboardEditorCell.referenceImages[0].name}
+                              draggable="false"
+                            />
+                          </div>
+                          <div className="professional-style-reference-copy">
+                            <strong title={storyboardEditorCell.referenceImages[0].name}>
+                              {storyboardEditorCell.referenceImages[0].name}
+                            </strong>
+                            <span>这张图会作为当前格子的额外参考，不会影响其它格子。</span>
+                          </div>
+                          <div className="professional-style-reference-actions">
+                            <label
+                              className="ghost-button professional-style-reference-action"
+                              aria-label="更换当前格子的参考图"
+                              title="上传新图"
+                            >
+                              <svg viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M10 13V4.5" />
+                                <path d="m6.8 7.7 3.2-3.2 3.2 3.2" />
+                                <path d="M4.5 14.5v.6c0 .8.6 1.4 1.4 1.4h8.2c.8 0 1.4-.6 1.4-1.4v-.6" />
+                              </svg>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                onChange={handleStoryboardReferenceFileChange}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="ghost-button professional-style-reference-action professional-style-reference-action-danger"
+                              onClick={() =>
+                                handleRemoveStoryboardReferenceImage(
+                                  storyboardEditorCell.referenceImages[0].id,
+                                )
+                              }
+                              aria-label="移除当前格子的参考图"
+                              title="移除图片"
+                            >
+                              <svg viewBox="0 0 20 20" aria-hidden="true">
+                                <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+                                <path d="M4 6h12" />
+                                <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+                                <path d="M8 9v4.5" />
+                                <path d="M12 9v4.5" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <label className="upload-box professional-style-upload storyboard-reference-upload">
                           <input
                             type="file"
                             accept="image/*"
                             onChange={handleStoryboardReferenceFileChange}
                           />
+                          <span>上传当前格子的参考图</span>
+                          <small>支持 1 张图片，只作用于这个格子。</small>
                         </label>
-                        <button
-                          type="button"
-                          className="ghost-button professional-style-reference-action professional-style-reference-action-danger"
-                          onClick={() =>
-                            handleRemoveStoryboardReferenceImage(
-                              storyboardEditorCell.referenceImages[0].id,
-                            )
-                          }
-                          aria-label="移除当前格子的参考图"
-                          title="移除图片"
-                        >
-                          <svg viewBox="0 0 20 20" aria-hidden="true">
-                            <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
-                            <path d="M4 6h12" />
-                            <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
-                            <path d="M8 9v4.5" />
-                            <path d="M12 9v4.5" />
-                          </svg>
-                        </button>
-                      </div>
+                      )}
                     </div>
-                  ) : (
-                    <label className="upload-box professional-style-upload storyboard-reference-upload">
+                  </>
+                ) : (
+                  <div className="storyboard-editor-asset-panel">
+                    <div className="section-title-inline">
+                      <strong>当前格子图片</strong>
+                      <span>可从本地上传，或从资源管理器选择一张图片放进当前格子。</span>
+                    </div>
+
+                    <label className="upload-box storyboard-editor-asset-upload">
                       <input
                         type="file"
                         accept="image/*"
-                        onChange={handleStoryboardReferenceFileChange}
+                        onChange={handleStoryboardLocalImageFileChange}
+                        disabled={storyboardEditorCell.status === "loading"}
                       />
-                      <span>上传当前格子的参考图</span>
-                      <small>支持 1 张图片，只作用于这个格子。</small>
+                      <span>上传本地图片到当前格子</span>
+                      <small>只替换这个格子的图片，不会影响其它格子。</small>
                     </label>
-                  )}
-                </div>
+
+                    <button
+                      type="button"
+                      className={`ghost-button storyboard-editor-library-button${storyboardLibraryPickerPending ? " is-pending" : ""}`}
+                      onClick={handleToggleStoryboardLibraryPicker}
+                      disabled={storyboardEditorCell.status === "loading" || storyboardLibraryPickerPending}
+                    >
+                      {storyboardLibraryPickerPending ? (
+                        <>
+                          <span className="storyboard-editor-library-spinner" aria-hidden="true" />
+                          历史图片加载中...
+                        </>
+                      ) : storyboardLibraryPickerOpen ? (
+                        "收起资源管理器图片"
+                      ) : (
+                        "从资源管理器选择图片"
+                      )}
+                    </button>
+
+                    {storyboardLibraryPickerOpen ? (
+                      generationLibrary.length > 0 ? (
+                        <div className="storyboard-library-picker" role="list" aria-label="资源管理器图片列表">
+                          {generationLibrary.map((record) => {
+                            const isSelected = storyboardEditorCell.record?.id === record.id;
+                            const fileTitle = record.downloadName || `banana-${record.id}.png`;
+
+                            return (
+                              <button
+                                key={record.id}
+                                type="button"
+                                role="listitem"
+                                className={`storyboard-library-item${isSelected ? " is-selected" : ""}`}
+                                onClick={() => handleSelectStoryboardLibraryRecord(record)}
+                              >
+                                <span className="storyboard-library-item-media">
+                                  <img src={record.previewUrl} alt={fileTitle} draggable="false" />
+                                </span>
+                                <span className="storyboard-library-item-copy">
+                                  <strong title={fileTitle}>{fileTitle}</strong>
+                                  <span>
+                                    {record.imageSize || "已保存"}
+                                    {record.aspectRatio ? ` · ${record.aspectRatio}` : ""}
+                                  </span>
+                                  <small>{formatPersistedAt(record.persistedAt)}</small>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="empty-state storyboard-library-empty-state">
+                          <p>资源管理器里还没有图片。</p>
+                          <small>先生成一张图，之后就可以在这里复用。</small>
+                        </div>
+                      )
+                    ) : null}
+                  </div>
+                )}
                 <div className="storyboard-caption-field">
                   <div className="storyboard-caption-field-header">
                     <label className="field-label" htmlFor="storyboardCellCaption">
@@ -4964,7 +5764,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     id="storyboardCellCaption"
                     name="storyboardCellCaption"
                     className="storyboard-caption-textarea"
-                    rows={3}
+                    rows={2}
                     value={storyboardEditorCell.caption || ""}
                     onChange={(event) => handleStoryboardCaptionChange(event.target.value)}
                     placeholder={"输入要显示在格子底部的文案\n例如：LV2.玩手机\n打游戏，原神启动！！！"}
@@ -4976,20 +5776,22 @@ function BananaStudioApp({ routeMode = "login" }) {
                 {storyboardEditorCell.error ? (
                   <p className="error-text">{storyboardEditorCell.error}</p>
                 ) : null}
-                <div className="storyboard-editor-actions">
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onClick={handleStoryboardCellGenerate}
-                    disabled={storyboardEditorCell.status === "loading" || !generationModelId}
-                  >
-                    {storyboardEditorCell.status === "loading"
-                      ? "banana 正在生图..."
-                      : storyboardEditorCell.record
-                        ? "重新生成图片"
-                        : "生成图片"}
-                  </button>
-                </div>
+                {isStoryboardEditorGenerateMode ? (
+                  <div className="storyboard-editor-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleStoryboardCellGenerate}
+                      disabled={storyboardEditorCell.status === "loading" || !generationModelId}
+                    >
+                      {storyboardEditorCell.status === "loading"
+                        ? "banana 正在生图..."
+                        : storyboardEditorCell.record
+                          ? "重新生成图片"
+                          : "生成图片"}
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               <div
@@ -5000,7 +5802,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     type="button"
                     className="storyboard-editor-preview-button"
                     onClick={() => openImagePreview(storyboardEditorCell.record)}
-                    aria-label="查看这个格子的生成图片"
+                    aria-label="查看这个格子的图片"
                   >
                     <img
                       src={storyboardEditorCell.record.previewUrl}
@@ -5011,11 +5813,21 @@ function BananaStudioApp({ routeMode = "login" }) {
                 ) : (
                   <div className="storyboard-editor-preview-empty">
                     <strong>当前还没有图片</strong>
-                    <span>可以直接生成，也可以从资源管理器里复用一张已有图片。</span>
+                    <span>
+                      {isStoryboardEditorAssetMode
+                        ? "可以从本地上传，或从资源管理器里挑一张图片放进当前格子。"
+                        : "填写提示词后直接生成，也可以补一张当前格子的参考图。"}
+                    </span>
                   </div>
                 )}
                 <div className="storyboard-editor-preview-meta">
-                  <strong>{storyboardEditorCell.record ? "已生成图片" : "图片预览区"}</strong>
+                  <strong>
+                    {storyboardEditorCell.record
+                      ? isStoryboardEditorAssetMode
+                        ? "当前图片"
+                        : "已生成图片"
+                      : "图片预览区"}
+                  </strong>
                   <span>
                     {storyboardEditorCell.record
                       ? `${storyboardEditorCell.record.imageSize || professionalStoryboardImageSizeValue}${
@@ -5026,60 +5838,29 @@ function BananaStudioApp({ routeMode = "login" }) {
                       : `目标生成规格 · ${professionalStoryboardImageSizeValue} · ${professionalStoryboardAspectRatioValue}`}
                   </span>
                 </div>
+              </div>
+            </div>
+            <div className="storyboard-editor-footer">
+              <div className="storyboard-editor-pager" aria-label="切换分镜格子">
                 <button
                   type="button"
-                  className={`ghost-button storyboard-editor-library-button${storyboardLibraryPickerPending ? " is-pending" : ""}`}
-                  onClick={handleToggleStoryboardLibraryPicker}
-                  disabled={storyboardEditorCell.status === "loading" || storyboardLibraryPickerPending}
+                  className="ghost-button storyboard-editor-nav-button"
+                  onClick={() => navigateStoryboardEditor("previous")}
+                  disabled={!previousStoryboardEditorCell}
                 >
-                  {storyboardLibraryPickerPending ? (
-                    <>
-                      <span className="storyboard-editor-library-spinner" aria-hidden="true" />
-                      历史图片加载中...
-                    </>
-                  ) : storyboardLibraryPickerOpen ? (
-                    "收起历史图片"
-                  ) : (
-                    "选择历史图片"
-                  )}
+                  上一格
                 </button>
-                {storyboardLibraryPickerOpen ? (
-                  generationLibrary.length > 0 ? (
-                    <div className="storyboard-library-picker" role="list" aria-label="资源管理器图片列表">
-                      {generationLibrary.map((record) => {
-                        const isSelected = storyboardEditorCell.record?.id === record.id;
-                        const fileTitle = record.downloadName || `banana-${record.id}.png`;
-
-                        return (
-                          <button
-                            key={record.id}
-                            type="button"
-                            role="listitem"
-                            className={`storyboard-library-item${isSelected ? " is-selected" : ""}`}
-                            onClick={() => handleSelectStoryboardLibraryRecord(record)}
-                          >
-                            <span className="storyboard-library-item-media">
-                              <img src={record.previewUrl} alt={fileTitle} draggable="false" />
-                            </span>
-                            <span className="storyboard-library-item-copy">
-                              <strong title={fileTitle}>{fileTitle}</strong>
-                              <span>
-                                {record.imageSize || "已保存"}
-                                {record.aspectRatio ? ` · ${record.aspectRatio}` : ""}
-                              </span>
-                              <small>{formatPersistedAt(record.persistedAt)}</small>
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="empty-state storyboard-library-empty-state">
-                      <p>资源管理器里还没有图片。</p>
-                      <small>先生成一张图，之后就可以在这里复用。</small>
-                    </div>
-                  )
-                ) : null}
+                <span className="storyboard-editor-pager-status">
+                  第 {storyboardEditorCell.index} 格 / 共 {storyboardCellList.length} 格
+                </span>
+                <button
+                  type="button"
+                  className="ghost-button storyboard-editor-nav-button"
+                  onClick={() => navigateStoryboardEditor("next")}
+                  disabled={!nextStoryboardEditorCell}
+                >
+                  下一格
+                </button>
               </div>
             </div>
           </section>
