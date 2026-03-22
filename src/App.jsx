@@ -4,6 +4,7 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCenter,
+  pointerWithin,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
@@ -565,6 +566,16 @@ function buildStoryboardCellTransformStyle(transform, transition) {
       .filter(Boolean)
       .join(", "),
   };
+}
+
+function resolveStoryboardCollisionDetection(args) {
+  const pointerCollisions = pointerWithin(args);
+
+  if (pointerCollisions.length > 0) {
+    return pointerCollisions;
+  }
+
+  return closestCenter(args);
 }
 
 function StoryboardCellContent({ cell }) {
@@ -5817,7 +5828,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     <div className="layout-preview-square" style={storyboardShellStyle}>
                       <DndContext
                         sensors={storyboardDragSensors}
-                        collisionDetection={closestCenter}
+                        collisionDetection={resolveStoryboardCollisionDetection}
                         onDragStart={handleStoryboardDragStart}
                         onDragCancel={handleStoryboardDragCancel}
                         onDragEnd={handleStoryboardDragEnd}

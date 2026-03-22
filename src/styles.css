@@ -28,6 +28,7 @@ body,
 #root {
   min-height: 100%;
   margin: 0;
+  overflow-x: clip;
 }
 
 body {
@@ -68,6 +69,7 @@ code {
   min-height: 100vh;
   padding: 16px;
   position: relative;
+  overflow-x: clip;
 }
 
 .page-shell::before,
@@ -756,6 +758,7 @@ textarea:focus {
 .layout-preview-shell {
   border-radius: 20px;
   padding: 0;
+  overflow: hidden;
 }
 
 .storyboard-style-disclosure {
@@ -1063,6 +1066,7 @@ textarea:focus {
 .layout-preview-square {
   width: min(100%, 340px);
   margin: 2px auto 0;
+  overflow: hidden;
 }
 
 .layout-preview-canvas {
