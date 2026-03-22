@@ -79,6 +79,29 @@ docker compose -f docker-compose.dev.yml down
 http://127.0.0.1:5173/login?pw=banana
 ```
 
+## Playwright 自测
+
+安装 Chromium（首次执行需要）：
+
+```bash
+npm run self-test:install
+```
+
+执行自测：
+
+```bash
+npm run self-test
+```
+
+说明：
+
+- 自测会先执行 `vite build`，再启动本地 `vite dev`
+- 浏览器层使用 Playwright
+- `/api/access/session` 和 `/api/models` 会在浏览器里被 mock，不消耗真实 Vertex / Gemini 额度
+- 当前默认包含 2 条烟测：
+  - 根路径跳转到 `/login`
+  - 专业模式场景包导入 / 导出
+
 ## Docker 生产部署
 
 项目根目录提供：

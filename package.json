@@ -10,7 +10,9 @@
     "dev": "vite",
     "dev:docker": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "self-test": "node scripts/self-test/self-test.mjs",
+    "self-test:install": "playwright install chromium"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

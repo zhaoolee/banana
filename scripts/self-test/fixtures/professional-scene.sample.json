@@ -1,0 +1,63 @@
+{
+  "kind": "banana.professional.scene",
+  "version": 1,
+  "exportedAt": "2026-03-22T12:00:00.000Z",
+  "mode": "professional",
+  "state": {
+    "selectedModelId": "nano-banana-2",
+    "globalPrompt": "E2E 全局提示词",
+    "canvasSize": "custom-scene-e2e",
+    "customScenarios": [
+      {
+        "value": "custom-scene-e2e",
+        "label": "E2E 四格场景",
+        "width": 1200,
+        "height": 1600,
+        "layoutRows": 2,
+        "layoutColumns": 2
+      }
+    ],
+    "customCanvasWidth": 1080,
+    "customCanvasHeight": 1440,
+    "layoutRows": 2,
+    "layoutColumns": 2,
+    "storyboardAspectRatio": "1:1",
+    "storyboardImageSize": "1K",
+    "selectedImageCount": 1,
+    "storyboardDividerWidthPx": 3,
+    "storyboardCaptionFontSizePercent": 120,
+    "storyboardCaptionBackgroundAlphaPercent": 88,
+    "referenceImages": [
+      {
+        "id": "style-reference-e2e",
+        "name": "style-reference.png",
+        "mimeType": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yF9sAAAAASUVORK5CYII="
+      }
+    ],
+    "storyboardCells": {
+      "storyboard-cell-1-1": {
+        "prompt": "第一格提示词",
+        "caption": "第一格配文",
+        "referenceImages": [
+          {
+            "id": "cell-reference-e2e",
+            "name": "cell-reference.png",
+            "mimeType": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yF9sAAAAASUVORK5CYII="
+          }
+        ],
+        "record": {
+          "id": "storyboard-record-e2e",
+          "persistedAt": "2026-03-22T12:00:00.000Z",
+          "downloadName": "storyboard-record-e2e.png",
+          "promptSnapshot": "E2E 全局提示词\n\n第一格提示词",
+          "imageSize": "1K",
+          "aspectRatio": "1:1",
+          "imageBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yF9sAAAAASUVORK5CYII=",
+          "mimeType": "image/png"
+        }
+      }
+    }
+  }
+}
