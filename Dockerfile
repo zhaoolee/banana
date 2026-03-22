@@ -20,6 +20,7 @@ RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server ./server
+COPY --from=builder /app/shared ./shared
 
 RUN mkdir -p /app/storage/generations /app/storage/logs
 
