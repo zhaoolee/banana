@@ -48,6 +48,8 @@ const STORYBOARD_EDITOR_MODE_ASSET = "asset";
 const PROFESSIONAL_DEFAULT_CELL_ASPECT_RATIO = "1:1";
 const PROFESSIONAL_STYLE_REFERENCE_LIMIT = 1;
 const STORYBOARD_CELL_REFERENCE_LIMIT = 1;
+const PROFESSIONAL_SCENE_ARCHIVE_KIND = "banana.professional.scene";
+const PROFESSIONAL_SCENE_ARCHIVE_VERSION = 1;
 const DEFAULT_CUSTOM_CANVAS_WIDTH = 1080;
 const DEFAULT_CUSTOM_CANVAS_HEIGHT = 1440;
 const DEFAULT_STORYBOARD_DIVIDER_WIDTH_PX = 2;
@@ -107,6 +109,14 @@ const CANVAS_SIZE_OPTIONS = [
     height: 1440,
     layoutRows: 2,
     layoutColumns: 4,
+  },
+  {
+    value: "xiaohongshu-cover-4-grid",
+    label: "小红书封面4宫格",
+    width: 1080,
+    height: 1440,
+    layoutRows: 4,
+    layoutColumns: 1,
   },
   {
     value: "square-logo",
@@ -705,6 +715,14 @@ function readSearchParam(key) {
   return new URLSearchParams(window.location.search).get(key) || "";
 }
 
+function detectMobilePerformanceMode() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+
+  return window.matchMedia("(max-width: 900px), (hover: none) and (pointer: coarse)").matches;
+}
+
 function reorderReferenceImages(items, startIndex, endIndex) {
   const nextItems = [...items];
   const [movedItem] = nextItems.splice(startIndex, 1);
@@ -733,6 +751,38 @@ function writeLocalValue(key, value) {
   window.localStorage.setItem(key, value);
 }
 
+function sanitizeProfessionalCustomScenarios(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items
+    .map((item, index) => {
+      const label = normalizeTextValue(item?.label);
+      const width = normalizeCanvasDimensionValue(item?.width, DEFAULT_CUSTOM_CANVAS_WIDTH);
+      const height = normalizeCanvasDimensionValue(item?.height, DEFAULT_CUSTOM_CANVAS_HEIGHT);
+      const layoutRows = clampLayoutTrack(item?.layoutRows);
+      const layoutColumns = clampLayoutTrack(item?.layoutColumns);
+
+      if (!label) {
+        return null;
+      }
+
+      return {
+        value:
+          normalizeTextValue(item?.value) ||
+          normalizeTextValue(item?.id) ||
+          `custom-scene-${index + 1}`,
+        label,
+        width,
+        height,
+        layoutRows,
+        layoutColumns,
+      };
+    })
+    .filter(Boolean);
+}
+
 function readStoredProfessionalCustomScenarios() {
   const rawValue = readLocalValue(PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY);
 
@@ -742,36 +792,7 @@ function readStoredProfessionalCustomScenarios() {
 
   try {
     const parsedValue = JSON.parse(rawValue);
-
-    if (!Array.isArray(parsedValue)) {
-      return [];
-    }
-
-    return parsedValue
-      .map((item, index) => {
-        const label = normalizeTextValue(item?.label);
-        const width = normalizeCanvasDimensionValue(item?.width, DEFAULT_CUSTOM_CANVAS_WIDTH);
-        const height = normalizeCanvasDimensionValue(item?.height, DEFAULT_CUSTOM_CANVAS_HEIGHT);
-        const layoutRows = clampLayoutTrack(item?.layoutRows);
-        const layoutColumns = clampLayoutTrack(item?.layoutColumns);
-
-        if (!label) {
-          return null;
-        }
-
-        return {
-          value:
-            normalizeTextValue(item?.value) ||
-            normalizeTextValue(item?.id) ||
-            `custom-scene-${index + 1}`,
-          label,
-          width,
-          height,
-          layoutRows,
-          layoutColumns,
-        };
-      })
-      .filter(Boolean);
+    return sanitizeProfessionalCustomScenarios(parsedValue);
   } catch (_error) {
     return [];
   }
@@ -819,6 +840,22 @@ function buildDownloadNameWithOptions({ mimeType = "image/png", suffix = "" } = 
 
   const safeSuffix = suffix ? `-${String(suffix).replace(/^-+/, "")}` : "";
   return `banana-${datePart}-${timePart}${safeSuffix}.${getFileExtensionFromMimeType(mimeType)}`;
+}
+
+function buildProfessionalSceneArchiveDownloadName() {
+  const now = new Date();
+  const datePart = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+  const timePart = [
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+  ].join("");
+
+  return `banana-${datePart}-${timePart}-professional-scene.json`;
 }
 
 function formatPersistedAt(value) {
@@ -976,6 +1013,16 @@ async function readFileAsReferenceImage(file) {
     previewUrl: dataUrl,
     data: base64,
   };
+}
+
+async function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
+    reader.readAsText(file);
+  });
 }
 
 async function readFileAsGenerationResultRecord(file) {
@@ -1254,6 +1301,25 @@ async function requestProfessionalExportPreview(password, payload) {
   };
 }
 
+function downloadTextFile(filename, text, mimeType = "application/json") {
+  if (typeof document === "undefined") {
+    throw new Error("当前环境不支持下载文件");
+  }
+
+  const blob = new Blob([text], {
+    type: `${mimeType};charset=utf-8`,
+  });
+  const downloadUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = downloadUrl;
+  anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+}
+
 function ReferenceCard({ image, index, onRemove, isDragging = false }) {
   return (
     <article className={`reference-card${isDragging ? " is-dragging" : ""}`}>
@@ -1272,7 +1338,13 @@ function ReferenceCard({ image, index, onRemove, isDragging = false }) {
         ×
       </button>
       <div className="reference-image-frame">
-        <img src={image.previewUrl} alt={image.name} draggable="false" />
+        <img
+          src={image.previewUrl}
+          alt={image.name}
+          draggable="false"
+          loading="lazy"
+          decoding="async"
+        />
       </div>
       <button
         type="button"
@@ -1583,6 +1655,151 @@ function buildPersistedStoryboardCells(cells) {
   );
 }
 
+function buildProfessionalSceneArchive({
+  selectedModelId,
+  globalPrompt,
+  canvasSize,
+  customScenarios,
+  customCanvasWidth,
+  customCanvasHeight,
+  layoutRows,
+  layoutColumns,
+  storyboardAspectRatio,
+  storyboardImageSize,
+  selectedImageCount,
+  storyboardDividerWidthPx,
+  storyboardCaptionFontSizePercent,
+  storyboardCaptionBackgroundAlphaPercent,
+  referenceImages,
+  storyboardCells,
+}) {
+  return {
+    kind: PROFESSIONAL_SCENE_ARCHIVE_KIND,
+    version: PROFESSIONAL_SCENE_ARCHIVE_VERSION,
+    exportedAt: new Date().toISOString(),
+    mode: PANEL_MODE_PROFESSIONAL,
+    state: {
+      selectedModelId: normalizeTextValue(selectedModelId),
+      globalPrompt: typeof globalPrompt === "string" ? globalPrompt : "",
+      canvasSize: normalizeCanvasScenarioValue(canvasSize, customScenarios),
+      customScenarios: buildPersistedProfessionalCustomScenarios(customScenarios),
+      customCanvasWidth: normalizeCanvasDimensionValue(
+        customCanvasWidth,
+        DEFAULT_CUSTOM_CANVAS_WIDTH,
+      ),
+      customCanvasHeight: normalizeCanvasDimensionValue(
+        customCanvasHeight,
+        DEFAULT_CUSTOM_CANVAS_HEIGHT,
+      ),
+      layoutRows: clampLayoutTrack(layoutRows),
+      layoutColumns: clampLayoutTrack(layoutColumns),
+      storyboardAspectRatio: normalizeAspectRatioValue(storyboardAspectRatio),
+      storyboardImageSize: normalizeImageSizeValue(storyboardImageSize),
+      selectedImageCount: normalizeImageCountValue(selectedImageCount),
+      storyboardDividerWidthPx: normalizeStoryboardDividerWidthPx(storyboardDividerWidthPx),
+      storyboardCaptionFontSizePercent: normalizeStoryboardCaptionFontSizePercent(
+        storyboardCaptionFontSizePercent,
+      ),
+      storyboardCaptionBackgroundAlphaPercent:
+        normalizeStoryboardCaptionBackgroundAlphaPercent(
+          storyboardCaptionBackgroundAlphaPercent,
+        ),
+      referenceImages: Array.isArray(referenceImages)
+        ? referenceImages
+            .map(buildPersistedReferenceImage)
+            .filter(Boolean)
+            .slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT)
+        : [],
+      storyboardCells: buildPersistedStoryboardCells(storyboardCells),
+    },
+  };
+}
+
+function resolveProfessionalSceneArchiveState(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("场景文件内容无效");
+  }
+
+  if (input.kind && input.kind !== PROFESSIONAL_SCENE_ARCHIVE_KIND) {
+    throw new Error("不是可识别的 banana 专业模式场景文件");
+  }
+
+  const rawState =
+    input.kind === PROFESSIONAL_SCENE_ARCHIVE_KIND
+      ? input.state
+      : input.state || input.professionalScene || input;
+
+  if (!rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+    throw new Error("场景文件缺少可导入的数据");
+  }
+
+  const customScenarios = sanitizeProfessionalCustomScenarios(rawState.customScenarios);
+  const layoutRows = clampLayoutTrack(rawState.layoutRows ?? rawState.professionalLayoutRows);
+  const layoutColumns = clampLayoutTrack(
+    rawState.layoutColumns ?? rawState.professionalLayoutColumns,
+  );
+  const canvasSize = normalizeCanvasScenarioValue(
+    normalizeTextValue(rawState.canvasSize ?? rawState.professionalCanvasSize),
+    customScenarios,
+  );
+
+  return {
+    selectedModelId: normalizeTextValue(
+      rawState.selectedModelId ?? rawState.professionalSelectedModelId,
+    ),
+    globalPrompt:
+      typeof rawState.globalPrompt === "string"
+        ? rawState.globalPrompt
+        : typeof rawState.professionalGlobalPrompt === "string"
+          ? rawState.professionalGlobalPrompt
+          : "",
+    canvasSize,
+    customScenarios,
+    customCanvasWidth: normalizeCanvasDimensionValue(
+      rawState.customCanvasWidth ?? rawState.professionalCustomCanvasWidth,
+      DEFAULT_CUSTOM_CANVAS_WIDTH,
+    ),
+    customCanvasHeight: normalizeCanvasDimensionValue(
+      rawState.customCanvasHeight ?? rawState.professionalCustomCanvasHeight,
+      DEFAULT_CUSTOM_CANVAS_HEIGHT,
+    ),
+    layoutRows,
+    layoutColumns,
+    storyboardAspectRatio: normalizeAspectRatioValue(
+      rawState.storyboardAspectRatio ?? rawState.professionalStoryboardAspectRatio,
+    ),
+    storyboardImageSize: normalizeImageSizeValue(
+      rawState.storyboardImageSize ?? rawState.professionalStoryboardImageSize,
+    ),
+    selectedImageCount: normalizeImageCountValue(
+      rawState.selectedImageCount ?? rawState.professionalSelectedImageCount,
+    ),
+    storyboardDividerWidthPx: normalizeStoryboardDividerWidthPx(
+      rawState.storyboardDividerWidthPx ?? rawState.professionalStoryboardDividerWidthPx,
+    ),
+    storyboardCaptionFontSizePercent: normalizeStoryboardCaptionFontSizePercent(
+      rawState.storyboardCaptionFontSizePercent ??
+        rawState.professionalStoryboardCaptionFontSizePercent,
+    ),
+    storyboardCaptionBackgroundAlphaPercent:
+      normalizeStoryboardCaptionBackgroundAlphaPercent(
+        rawState.storyboardCaptionBackgroundAlphaPercent ??
+          rawState.professionalStoryboardCaptionBackgroundAlphaPercent,
+      ),
+    referenceImages: Array.isArray(rawState.referenceImages)
+      ? rawState.referenceImages
+          .map(restorePersistedReferenceImage)
+          .filter(Boolean)
+          .slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT)
+      : [],
+    storyboardCells: normalizeStoryboardCells(
+      restorePersistedStoryboardCells(rawState.storyboardCells || rawState.cells),
+      layoutRows,
+      layoutColumns,
+    ),
+  };
+}
+
 function buildPersistedReferenceImage(image) {
   if (!image?.data || !image?.mimeType) {
     return null;
@@ -1659,6 +1876,17 @@ async function writePersistedGenerationLibrary(records) {
   await generationResultStorage.removeItem(GENERATION_LIBRARY_RECORDS_KEY);
 }
 
+async function writeLastGenerationRecord(record) {
+  const persistedRecord = buildPersistedGenerationResultRecord(record);
+
+  if (persistedRecord) {
+    await generationResultStorage.setItem(LAST_GENERATION_RECORD_KEY, persistedRecord);
+    return;
+  }
+
+  await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
+}
+
 async function writeLastGenerationRecordId(recordId) {
   if (recordId) {
     await generationResultStorage.setItem(LAST_GENERATION_RECORD_ID_KEY, recordId);
@@ -1710,26 +1938,28 @@ async function writePersistedReferenceImages(images) {
 async function readPersistedGenerationArtifacts() {
   let libraryRecords = await readPersistedGenerationLibrary();
   let lastRecordId = await generationResultStorage.getItem(LAST_GENERATION_RECORD_ID_KEY);
+  const persistedCurrentRecord = restorePersistedGenerationResultRecord(
+    await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY),
+  );
 
-  if (!libraryRecords.length) {
-    const legacyRecord = await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY);
-    const restoredLegacyRecord = restorePersistedGenerationResultRecord(legacyRecord);
-
-    if (restoredLegacyRecord) {
-      libraryRecords = [restoredLegacyRecord];
-      lastRecordId = restoredLegacyRecord.id;
-      await Promise.all([
-        writePersistedGenerationLibrary(libraryRecords),
-        writeLastGenerationRecordId(restoredLegacyRecord.id),
-        generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY),
-      ]);
-    }
-  } else if (await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY)) {
-    await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
+  if (!libraryRecords.length && persistedCurrentRecord) {
+    libraryRecords = [persistedCurrentRecord];
+    lastRecordId = persistedCurrentRecord.id;
+    await Promise.all([
+      writePersistedGenerationLibrary(libraryRecords),
+      writeLastGenerationRecordId(persistedCurrentRecord.id),
+    ]);
   }
 
   const currentRecord =
-    libraryRecords.find((record) => record.id === lastRecordId) || libraryRecords[0] || null;
+    persistedCurrentRecord ||
+    libraryRecords.find((record) => record.id === lastRecordId) ||
+    libraryRecords[0] ||
+    null;
+
+  if (currentRecord) {
+    await writeLastGenerationRecord(currentRecord);
+  }
 
   if (currentRecord && currentRecord.id !== lastRecordId) {
     await writeLastGenerationRecordId(currentRecord.id);
@@ -1739,6 +1969,24 @@ async function readPersistedGenerationArtifacts() {
     libraryRecords,
     currentRecord,
   };
+}
+
+async function readPersistedCurrentGenerationRecord() {
+  const persistedCurrentRecord = restorePersistedGenerationResultRecord(
+    await generationResultStorage.getItem(LAST_GENERATION_RECORD_KEY),
+  );
+
+  if (persistedCurrentRecord) {
+    return persistedCurrentRecord;
+  }
+
+  const persistedArtifacts = await readPersistedGenerationArtifacts();
+
+  if (persistedArtifacts.currentRecord) {
+    await writeLastGenerationRecord(persistedArtifacts.currentRecord);
+  }
+
+  return persistedArtifacts.currentRecord;
 }
 
 function ResourceCard({ record, onPreview, onDelete }) {
@@ -1753,7 +2001,13 @@ function ResourceCard({ record, onPreview, onDelete }) {
         onClick={() => onPreview(record)}
         aria-label="查看本地图片"
       >
-        <img src={record.previewUrl} alt="本地保存的 banana 图片" draggable="false" />
+        <img
+          src={record.previewUrl}
+          alt="本地保存的 banana 图片"
+          draggable="false"
+          loading="lazy"
+          decoding="async"
+        />
       </button>
       <div className="finder-item-toolbar">
         <button type="button" className="finder-item-action" onClick={() => onPreview(record)}>
@@ -1799,11 +2053,16 @@ function FinderSidebarItem({ item, isActive, onSelect }) {
 
 function BananaStudioApp({ routeMode = "login" }) {
   const urlPassword = normalizeTextValue(readSearchParam("pw"));
-  const shouldAutoVerifyStudioPassword = routeMode === "studio" && Boolean(urlPassword);
+  const isE2eStudioMode =
+    import.meta.env.DEV &&
+    routeMode === "studio" &&
+    readSearchParam("e2e") === "1";
+  const shouldAutoVerifyStudioPassword =
+    routeMode === "studio" && Boolean(urlPassword) && !isE2eStudioMode;
   const [password, setPassword] = useState(() => urlPassword);
-  const [activePw, setActivePw] = useState("");
+  const [activePw, setActivePw] = useState(() => (isE2eStudioMode ? "__banana_e2e__" : ""));
   const [sessionState, setSessionState] = useState(() =>
-    shouldAutoVerifyStudioPassword ? "checking" : "locked",
+    isE2eStudioMode ? "ready" : shouldAutoVerifyStudioPassword ? "checking" : "locked",
   );
   const [models, setModels] = useState([]);
   const [panelMode, setPanelMode] = useState(() =>
@@ -1873,6 +2132,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [studioError, setStudioError] = useState("");
   const [studioPending, setStudioPending] = useState(false);
   const [professionalExportPending, setProfessionalExportPending] = useState(false);
+  const [professionalSceneTransferPending, setProfessionalSceneTransferPending] = useState(false);
   const [enhancePending, setEnhancePending] = useState(false);
   const [backendRequestCount, setBackendRequestCount] = useState(0);
   const [backendBusyLabel, setBackendBusyLabel] = useState("");
@@ -1883,6 +2143,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [generationResult, setGenerationResult] = useState(null);
   const [generationResults, setGenerationResults] = useState([]);
   const [generationLibrary, setGenerationLibrary] = useState([]);
+  const [generationLibraryLoaded, setGenerationLibraryLoaded] = useState(false);
   const [resourceManagerPending, setResourceManagerPending] = useState(false);
   const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
   const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
@@ -1955,6 +2216,12 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
   const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
   const [storyboardCellsHydrated, setStoryboardCellsHydrated] = useState(false);
+  const [isMobilePerformanceMode, setIsMobilePerformanceMode] = useState(() =>
+    detectMobilePerformanceMode(),
+  );
+  const [professionalExportPreviewVisible, setProfessionalExportPreviewVisible] = useState(() =>
+    !detectMobilePerformanceMode(),
+  );
   const [professionalExportScale, setProfessionalExportScale] = useState(1);
   const [professionalExportCardElement, setProfessionalExportCardElement] = useState(null);
   const layoutCanvasRef = useRef(null);
@@ -1962,7 +2229,8 @@ function BananaStudioApp({ routeMode = "login" }) {
   const storyboardCaptionTextareaRef = useRef(null);
   const storyboardShareCopyResetTimeoutRef = useRef(null);
   const storyboardLibraryPickerTimeoutRef = useRef(null);
-  const resourceManagerOpenTimerRef = useRef(null);
+  const generationLibraryLoadPromiseRef = useRef(null);
+  const professionalSceneImportInputRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
   const imagePreviewPointersRef = useRef(new Map());
@@ -1977,10 +2245,14 @@ function BananaStudioApp({ routeMode = "login" }) {
   const isProfessionalPanelMode = panelMode === PANEL_MODE_PROFESSIONAL;
   const showResultPanel = isSimplePanelMode;
   const showProfessionalExportPanel = isProfessionalPanelMode;
+  const shouldRenderProfessionalExportPreview =
+    showProfessionalExportPanel && professionalExportPreviewVisible;
   const showPromptField = isSimplePanelMode;
   const isPromptFocusMode = showPromptField && promptMode === "focus";
   const showSimplePanelSubmit = isSimplePanelMode && !isPromptFocusMode;
   const showProfessionalPanelControls = isProfessionalPanelMode && !isPromptFocusMode;
+  const professionalSceneTransferReady =
+    referenceImagesHydrated && storyboardCellsHydrated;
   const storyboardCellDefinitions = useMemo(
     () => buildStoryboardCellDefinitions(professionalLayoutRows, professionalLayoutColumns),
     [professionalLayoutColumns, professionalLayoutRows],
@@ -2026,10 +2298,22 @@ function BananaStudioApp({ routeMode = "login" }) {
   const isStoryboardEditorAssetMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET;
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 900px), (hover: none) and (pointer: coarse)");
+    const handleChange = () => {
+      const nextValue = mediaQuery.matches;
+      setIsMobilePerformanceMode(nextValue);
+      setProfessionalExportPreviewVisible(nextValue ? false : true);
+    };
+
+    handleChange();
+    mediaQuery.addEventListener("change", handleChange);
+
     return () => {
-      if (resourceManagerOpenTimerRef.current) {
-        window.clearTimeout(resourceManagerOpenTimerRef.current);
-      }
+      mediaQuery.removeEventListener("change", handleChange);
     };
   }, []);
   const storyboardCaptionFontScale = professionalStoryboardCaptionFontSizePercent / 100;
@@ -2196,13 +2480,36 @@ function BananaStudioApp({ routeMode = "login" }) {
     };
   }
 
+  async function ensureGenerationLibraryLoaded() {
+    if (generationLibraryLoaded) {
+      return generationLibrary;
+    }
+
+    if (generationLibraryLoadPromiseRef.current) {
+      return generationLibraryLoadPromiseRef.current;
+    }
+
+    const loadPromise = readPersistedGenerationLibrary()
+      .then((records) => {
+        setGenerationLibrary(records);
+        setGenerationLibraryLoaded(true);
+        return records;
+      })
+      .finally(() => {
+        generationLibraryLoadPromiseRef.current = null;
+      });
+
+    generationLibraryLoadPromiseRef.current = loadPromise;
+    return loadPromise;
+  }
+
   useEffect(() => {
     let cancelled = false;
 
     async function restorePersistedImages() {
       try {
-        const [persistedArtifacts, persistedStoryboardCells, persistedReferenceImages] = await Promise.all([
-          readPersistedGenerationArtifacts(),
+        const [persistedCurrentRecord, persistedStoryboardCells, persistedReferenceImages] = await Promise.all([
+          readPersistedCurrentGenerationRecord(),
           readPersistedStoryboardCells(),
           readPersistedReferenceImages(),
         ]);
@@ -2211,9 +2518,8 @@ function BananaStudioApp({ routeMode = "login" }) {
           return;
         }
 
-        setGenerationLibrary(persistedArtifacts.libraryRecords);
-        setGenerationResult(persistedArtifacts.currentRecord);
-        setGenerationResults(persistedArtifacts.currentRecord ? [persistedArtifacts.currentRecord] : []);
+        setGenerationResult(persistedCurrentRecord);
+        setGenerationResults(persistedCurrentRecord ? [persistedCurrentRecord] : []);
         setReferenceImages(persistedReferenceImages.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT));
         setStoryboardCells(
           normalizeStoryboardCells(
@@ -2267,6 +2573,13 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [isBackendBusy]);
 
   useEffect(() => {
+    if (isE2eStudioMode) {
+      setActivePw("__banana_e2e__");
+      setRemainingQuota(null);
+      setSessionState("ready");
+      return;
+    }
+
     if (routeMode === "studio") {
       if (!urlPassword) {
         setActivePw("");
@@ -2280,7 +2593,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     setActivePw("");
     setRemainingQuota(null);
     setSessionState("locked");
-  }, [routeMode, urlPassword]);
+  }, [isE2eStudioMode, routeMode, urlPassword]);
 
   useEffect(() => {
     if (!shouldAutoVerifyStudioPassword) {
@@ -2919,7 +3232,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   useLayoutEffect(() => {
     const card = professionalExportCardElement;
 
-    if (!card || !showProfessionalExportPanel) {
+    if (!card || !shouldRenderProfessionalExportPreview) {
       setProfessionalExportScale(1);
       return;
     }
@@ -2969,7 +3282,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     professionalExportCardElement,
     professionalCanvasSizeOption.height,
     professionalCanvasSizeOption.width,
-    showProfessionalExportPanel,
+    shouldRenderProfessionalExportPreview,
   ]);
 
   useEffect(() => {
@@ -3216,6 +3529,181 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
   }
 
+  async function applyImportedProfessionalScene(sceneState) {
+    const persistedCustomScenarios = buildPersistedProfessionalCustomScenarios(
+      sceneState.customScenarios,
+    );
+
+    setPanelMode(PANEL_MODE_PROFESSIONAL);
+    setProfessionalSelectedModelId(sceneState.selectedModelId);
+    setProfessionalGlobalPrompt(sceneState.globalPrompt);
+    setProfessionalCustomScenarios(sceneState.customScenarios);
+    setProfessionalCanvasSize(sceneState.canvasSize);
+    setProfessionalCustomCanvasWidth(sceneState.customCanvasWidth);
+    setProfessionalCustomCanvasHeight(sceneState.customCanvasHeight);
+    setProfessionalLayoutRows(sceneState.layoutRows);
+    setProfessionalLayoutColumns(sceneState.layoutColumns);
+    setProfessionalStoryboardAspectRatio(sceneState.storyboardAspectRatio);
+    setProfessionalStoryboardImageSize(sceneState.storyboardImageSize);
+    setProfessionalSelectedImageCount(sceneState.selectedImageCount);
+    setProfessionalStoryboardDividerWidthPx(sceneState.storyboardDividerWidthPx);
+    setProfessionalStoryboardCaptionFontSizePercent(
+      sceneState.storyboardCaptionFontSizePercent,
+    );
+    setProfessionalStoryboardCaptionBackgroundAlphaPercent(
+      sceneState.storyboardCaptionBackgroundAlphaPercent,
+    );
+    setReferenceImages(sceneState.referenceImages);
+    setReferenceImagesHydrated(true);
+    setStoryboardCells(sceneState.storyboardCells);
+    setStoryboardCellsHydrated(true);
+    setPromptMode("simple");
+    setStoryboardImageControlsCollapsed(true);
+    setStoryboardStyleControlsCollapsed(true);
+    setScenarioManagerOpen(false);
+    setResourceManagerOpen(false);
+    closeStoryboardEditor();
+    closeStoryboardClearConfirm();
+    closeImagePreview();
+    setStudioError("");
+
+    if (!isMobilePerformanceMode) {
+      setProfessionalExportPreviewVisible(true);
+    }
+
+    writeLocalValue(PANEL_MODE_STORAGE_KEY, PANEL_MODE_PROFESSIONAL);
+    writeLocalValue(PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY, sceneState.selectedModelId);
+    writeLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY, sceneState.globalPrompt);
+    writeLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY, sceneState.canvasSize);
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY,
+      persistedCustomScenarios.length > 0 ? JSON.stringify(persistedCustomScenarios) : "",
+    );
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY,
+      String(sceneState.customCanvasWidth),
+    );
+    writeLocalValue(
+      PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY,
+      String(sceneState.customCanvasHeight),
+    );
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY,
+      String(sceneState.layoutRows),
+    );
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY,
+      String(sceneState.layoutColumns),
+    );
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_ASPECT_RATIO_STORAGE_KEY,
+      sceneState.storyboardAspectRatio,
+    );
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_IMAGE_SIZE_STORAGE_KEY,
+      sceneState.storyboardImageSize,
+    );
+    writeLocalValue(
+      PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY,
+      String(sceneState.selectedImageCount),
+    );
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_DIVIDER_WIDTH_STORAGE_KEY,
+      String(sceneState.storyboardDividerWidthPx),
+    );
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY,
+      String(sceneState.storyboardCaptionFontSizePercent),
+    );
+    writeLocalValue(
+      PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY,
+      String(sceneState.storyboardCaptionBackgroundAlphaPercent),
+    );
+
+    await Promise.all([
+      writePersistedReferenceImages(sceneState.referenceImages),
+      writePersistedStoryboardCells(sceneState.storyboardCells),
+    ]);
+  }
+
+  async function handleExportProfessionalScene() {
+    if (!professionalSceneTransferReady) {
+      return;
+    }
+
+    setProfessionalSceneTransferPending(true);
+    setStudioError("");
+
+    try {
+      const archive = buildProfessionalSceneArchive({
+        selectedModelId: professionalSelectedModelId,
+        globalPrompt: professionalGlobalPrompt,
+        canvasSize: professionalCanvasSize,
+        customScenarios: professionalCustomScenarios,
+        customCanvasWidth: professionalCustomCanvasWidth,
+        customCanvasHeight: professionalCustomCanvasHeight,
+        layoutRows: professionalLayoutRows,
+        layoutColumns: professionalLayoutColumns,
+        storyboardAspectRatio: professionalStoryboardAspectRatioValue,
+        storyboardImageSize: professionalStoryboardImageSizeValue,
+        selectedImageCount: professionalSelectedImageCount,
+        storyboardDividerWidthPx: professionalStoryboardDividerWidthPx,
+        storyboardCaptionFontSizePercent: professionalStoryboardCaptionFontSizePercent,
+        storyboardCaptionBackgroundAlphaPercent:
+          professionalStoryboardCaptionBackgroundAlphaPercent,
+        referenceImages,
+        storyboardCells,
+      });
+
+      downloadTextFile(
+        buildProfessionalSceneArchiveDownloadName(),
+        JSON.stringify(archive, null, 2),
+      );
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "专业模式场景导出失败");
+    } finally {
+      setProfessionalSceneTransferPending(false);
+    }
+  }
+
+  function handleOpenProfessionalSceneImport() {
+    if (professionalSceneTransferPending || !professionalSceneTransferReady) {
+      return;
+    }
+
+    professionalSceneImportInputRef.current?.click();
+  }
+
+  async function handleImportProfessionalSceneFileChange(event) {
+    const [file] = Array.from(event.target.files || []);
+
+    if (!file) {
+      return;
+    }
+
+    setProfessionalSceneTransferPending(true);
+    setStudioError("");
+
+    try {
+      const rawText = await readFileAsText(file);
+      let parsedValue = null;
+
+      try {
+        parsedValue = JSON.parse(rawText);
+      } catch {
+        throw new Error("场景文件不是合法的 JSON");
+      }
+
+      const sceneState = resolveProfessionalSceneArchiveState(parsedValue);
+      await applyImportedProfessionalScene(sceneState);
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "专业模式场景导入失败");
+    } finally {
+      setProfessionalSceneTransferPending(false);
+      event.target.value = "";
+    }
+  }
+
   async function appendReferenceFiles(files) {
     try {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -3420,14 +3908,25 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   async function persistGeneratedRecords(records, currentRecordId = records[0]?.id || "") {
-    const nextLibraryRecords = [...records, ...generationLibrary];
+    const existingLibraryRecords = await ensureGenerationLibraryLoaded();
+    const nextRecordIds = new Set(records.map((record) => record.id));
+    const nextLibraryRecords = [
+      ...records,
+      ...existingLibraryRecords.filter((record) => !nextRecordIds.has(record.id)),
+    ];
+    const currentRecord =
+      nextLibraryRecords.find((record) => record.id === currentRecordId) ||
+      records[0] ||
+      null;
 
     await Promise.all([
       writePersistedGenerationLibrary(nextLibraryRecords),
       writeLastGenerationRecordId(currentRecordId),
+      writeLastGenerationRecord(currentRecord),
     ]);
 
     setGenerationLibrary(nextLibraryRecords);
+    setGenerationLibraryLoaded(true);
   }
 
   async function persistGeneratedRecord(record) {
@@ -3444,7 +3943,10 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     setGenerationResult(record);
-    void writeLastGenerationRecordId(record.id);
+    void Promise.all([
+      writeLastGenerationRecordId(record.id),
+      writeLastGenerationRecord(record),
+    ]);
   }
 
   function handleProfessionalScenarioChange(value) {
@@ -3618,32 +4120,35 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   async function handleDeleteStoredRecord(recordId) {
-    const nextLibraryRecords = generationLibrary.filter((record) => record.id !== recordId);
-    const nextBatchResults = generationResults.some((record) => record.id === recordId)
-      ? generationResults.filter((record) => record.id !== recordId)
-      : generationResults;
-    const nextStoredCurrentRecord =
-      nextLibraryRecords.find((record) => record.id === generationResult?.id) ||
-      nextLibraryRecords[0] ||
-      null;
-    const nextCurrentRecord =
-      generationResult?.id === recordId
-        ? nextBatchResults[0] || nextStoredCurrentRecord || null
-        : generationResult || nextBatchResults[0] || nextStoredCurrentRecord;
-    const normalizedNextBatchResults =
-      nextBatchResults.length > 0
-        ? nextBatchResults
-        : nextCurrentRecord
-          ? [nextCurrentRecord]
-          : [];
-
     try {
+      const existingLibraryRecords = await ensureGenerationLibraryLoaded();
+      const nextLibraryRecords = existingLibraryRecords.filter((record) => record.id !== recordId);
+      const nextBatchResults = generationResults.some((record) => record.id === recordId)
+        ? generationResults.filter((record) => record.id !== recordId)
+        : generationResults;
+      const nextStoredCurrentRecord =
+        nextLibraryRecords.find((record) => record.id === generationResult?.id) ||
+        nextLibraryRecords[0] ||
+        null;
+      const nextCurrentRecord =
+        generationResult?.id === recordId
+          ? nextBatchResults[0] || nextStoredCurrentRecord || null
+          : generationResult || nextBatchResults[0] || nextStoredCurrentRecord;
+      const normalizedNextBatchResults =
+        nextBatchResults.length > 0
+          ? nextBatchResults
+          : nextCurrentRecord
+            ? [nextCurrentRecord]
+            : [];
+
       await Promise.all([
         writePersistedGenerationLibrary(nextLibraryRecords),
         writeLastGenerationRecordId(nextStoredCurrentRecord?.id || ""),
+        writeLastGenerationRecord(nextCurrentRecord),
       ]);
 
       setGenerationLibrary(nextLibraryRecords);
+      setGenerationLibraryLoaded(true);
       setCurrentGenerationSelection(normalizedNextBatchResults, nextCurrentRecord);
 
       if (
@@ -3849,11 +4354,18 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     setStoryboardLibraryPickerPending(true);
-    storyboardLibraryPickerTimeoutRef.current = window.setTimeout(() => {
-      setStoryboardLibraryPickerOpen(true);
-      setStoryboardLibraryPickerPending(false);
-      storyboardLibraryPickerTimeoutRef.current = null;
-    }, 220);
+    void ensureGenerationLibraryLoaded()
+      .then(() => {
+        storyboardLibraryPickerTimeoutRef.current = window.setTimeout(() => {
+          setStoryboardLibraryPickerOpen(true);
+          setStoryboardLibraryPickerPending(false);
+          storyboardLibraryPickerTimeoutRef.current = null;
+        }, 220);
+      })
+      .catch((error) => {
+        setStudioError(error instanceof Error ? error.message : "资源管理器图片加载失败");
+        setStoryboardLibraryPickerPending(false);
+      });
   }
 
   async function handleCopyStoryboardShare() {
@@ -4195,21 +4707,24 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     setResourceManagerPending(true);
-
-    if (resourceManagerOpenTimerRef.current) {
-      window.clearTimeout(resourceManagerOpenTimerRef.current);
-    }
-
-    resourceManagerOpenTimerRef.current = window.setTimeout(() => {
-      resourceManagerOpenTimerRef.current = null;
-      setResourceManagerOpen(true);
-      setResourceManagerPending(false);
-    }, 0);
+    void ensureGenerationLibraryLoaded()
+      .then(() => {
+        setResourceManagerOpen(true);
+      })
+      .catch((error) => {
+        setStudioError(error instanceof Error ? error.message : "资源管理器加载失败");
+      })
+      .finally(() => {
+        setResourceManagerPending(false);
+      });
   }
 
   function handlePreviewStoredRecord(record) {
     setCurrentGenerationSelection([record], record);
-    void writeLastGenerationRecordId(record.id);
+    void Promise.all([
+      writeLastGenerationRecordId(record.id),
+      writeLastGenerationRecord(record),
+    ]);
     openImagePreview(record);
   }
 
@@ -4446,6 +4961,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                 className="restored-result-image"
                 src={generationResult.previewUrl}
                 alt="Restored Banana result"
+                decoding="async"
               />
             </div>
           ) : null}
@@ -4468,6 +4984,7 @@ function BananaStudioApp({ routeMode = "login" }) {
               className="gate-hero-image"
               src="/bg/002.png"
               alt="Banana Studio 展示图"
+              decoding="async"
             />
           </section>
 
@@ -4476,6 +4993,7 @@ function BananaStudioApp({ routeMode = "login" }) {
               className="gate-panel-logo"
               src="/logo.png"
               alt="Banana Studio logo"
+              decoding="async"
             />
             <form className="gate-form" onSubmit={handleVerifySubmit}>
               <label htmlFor="password">提取码</label>
@@ -4508,7 +5026,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     <div className="page-shell studio-shell">
       <header className="studio-topbar">
         <div className="studio-brand">
-          <img className="studio-brand-logo" src="/logo.png" alt="Banana Studio" />
+          <img className="studio-brand-logo" src="/logo.png" alt="Banana Studio" decoding="async" />
         </div>
         <div className="topbar-actions">
           <button
@@ -4600,6 +5118,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                                   src={record.previewUrl}
                                   alt={`Banana generated variant ${index + 1}`}
                                   draggable="false"
+                                  loading="lazy"
+                                  decoding="async"
                                 />
                                 <span className="result-variant-label">{index + 1}</span>
                               </span>
@@ -4619,6 +5139,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                         src={generationResult.previewUrl}
                         alt="Banana generated result"
                         draggable="false"
+                        decoding="async"
                       />
                     </button>
                     <a
@@ -4651,6 +5172,67 @@ function BananaStudioApp({ routeMode = "login" }) {
                       {professionalCanvasSizeOption.label} · {professionalLayoutRows} 行 × {professionalLayoutColumns} 列
                     </span>
                     <div className="result-toolbar-actions professional-export-toolbar-actions">
+                      <input
+                        ref={professionalSceneImportInputRef}
+                        className="sr-only"
+                        type="file"
+                        accept="application/json,.json"
+                        onChange={handleImportProfessionalSceneFileChange}
+                      />
+                      <button
+                        type="button"
+                        className="ghost-button professional-export-transfer-button"
+                        onClick={handleOpenProfessionalSceneImport}
+                        disabled={!professionalSceneTransferReady || professionalSceneTransferPending}
+                      >
+                        <svg viewBox="0 0 20 20" aria-hidden="true">
+                          <path d="M10 3.8v8.8" />
+                          <path d="m6.8 9.5 3.2 3.2 3.2-3.2" />
+                          <path d="M4.2 14.8h11.6" />
+                          <path d="M5.3 14.8v.8c0 .8.6 1.4 1.4 1.4h6.6c.8 0 1.4-.6 1.4-1.4v-.8" />
+                        </svg>
+                        <span>{professionalSceneTransferPending ? "处理中..." : "导入"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button professional-export-transfer-button"
+                        onClick={handleExportProfessionalScene}
+                        disabled={!professionalSceneTransferReady || professionalSceneTransferPending}
+                      >
+                        <svg viewBox="0 0 20 20" aria-hidden="true">
+                          <path d="M10 16.2V7.4" />
+                          <path d="m6.8 10.6 3.2-3.2 3.2 3.2" />
+                          <path d="M4.2 5.2h11.6" />
+                          <path d="M5.3 5.2v-.8c0-.8.6-1.4 1.4-1.4h6.6c.8 0 1.4.6 1.4 1.4v.8" />
+                        </svg>
+                        <span>{professionalSceneTransferPending ? "处理中..." : "导出"}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button professional-export-toggle-button"
+                        onClick={() =>
+                          setProfessionalExportPreviewVisible((currentValue) => !currentValue)
+                        }
+                        aria-pressed={professionalExportPreviewVisible}
+                        aria-label={professionalExportPreviewVisible ? "隐藏预览" : "显示预览"}
+                        title={professionalExportPreviewVisible ? "隐藏预览" : "显示预览"}
+                      >
+                        {professionalExportPreviewVisible ? (
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M1.8 10s3-5 8.2-5 8.2 5 8.2 5-3 5-8.2 5-8.2-5-8.2-5Z" />
+                            <circle cx="10" cy="10" r="2.7" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 20 20" aria-hidden="true">
+                            <path d="M1.8 10s3-5 8.2-5c1.8 0 3.3.6 4.5 1.4 2.3 1.7 3.7 3.6 3.7 3.6s-3 5-8.2 5c-2 0-3.8-.7-5.2-1.7C2.9 11.7 1.8 10 1.8 10Z" />
+                            <circle cx="10" cy="10" r="2.7" />
+                            <path d="M3.5 3.5 16.5 16.5" />
+                          </svg>
+                        )}
+                        <span className="sr-only">
+                          {professionalExportPreviewVisible ? "隐藏预览" : "显示预览"}
+                        </span>
+                      </button>
                       <button
                         type="button"
                         className={`ghost-button storyboard-share-button${storyboardShareCopyState === "success" ? " is-success" : storyboardShareCopyState === "error" ? " is-error" : ""}`}
@@ -4695,14 +5277,6 @@ function BananaStudioApp({ routeMode = "login" }) {
                               : "复制分享"}
                         </span>
                       </button>
-                      <button
-                        type="button"
-                        className="primary-button professional-export-download-button"
-                        onClick={handleDownloadProfessionalExport}
-                        disabled={professionalExportPending || !professionalExportHasRenderableContent}
-                      >
-                        {professionalExportPending ? "正在导出..." : "下载"}
-                      </button>
                     </div>
                   </div>
 
@@ -4711,43 +5285,65 @@ function BananaStudioApp({ routeMode = "login" }) {
                       全局提示词与画风参考图：{normalizeTextValue(professionalGlobalPrompt)}
                     </p>
                   ) : null}
-                  <div className="professional-export-stage">
-                    <div className="professional-export-viewport" style={professionalExportViewportStyle}>
-                      <div className="professional-export-sheet" style={professionalExportSheetStyle}>
-                        <div
-                          id="professional-export-preview-capture"
-                          className="professional-export-grid"
-                          style={professionalExportGridStyle}
-                        >
-                          {storyboardCellList.map((cell) => (
-                            <div
-                              key={cell.id}
-                              className={`professional-export-cell${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
-                            >
-                              {cell.record ? (
-                                <img
-                                  className="professional-export-cell-image"
-                                  src={cell.record.previewUrl}
-                                  alt={`${cell.label} 导出预览`}
-                                  draggable="false"
-                                />
-                              ) : (
-                                <div className="professional-export-placeholder">
-                                  {normalizeTextValue(cell.prompt) || "待生成"}
-                                </div>
-                              )}
-                              {normalizeTextValue(cell.caption) ? (
-                                <span className="professional-export-cell-caption">
-                                  <span className="professional-export-cell-caption-text">
-                                    {normalizeTextValue(cell.caption)}
+                  {shouldRenderProfessionalExportPreview ? (
+                    <div className="professional-export-stage">
+                      <div className="professional-export-viewport" style={professionalExportViewportStyle}>
+                        <div className="professional-export-sheet" style={professionalExportSheetStyle}>
+                          <div
+                            id="professional-export-preview-capture"
+                            className="professional-export-grid"
+                            style={professionalExportGridStyle}
+                          >
+                            {storyboardCellList.map((cell) => (
+                              <div
+                                key={cell.id}
+                                className={`professional-export-cell${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}`}
+                              >
+                                {cell.record ? (
+                                  <img
+                                    className="professional-export-cell-image"
+                                    src={cell.record.previewUrl}
+                                    alt={`${cell.label} 导出预览`}
+                                    draggable="false"
+                                    loading="lazy"
+                                    decoding="async"
+                                  />
+                                ) : (
+                                  <div className="professional-export-placeholder">
+                                    {normalizeTextValue(cell.prompt) || "待生成"}
+                                  </div>
+                                )}
+                                {normalizeTextValue(cell.caption) ? (
+                                  <span className="professional-export-cell-caption">
+                                    <span className="professional-export-cell-caption-text">
+                                      {normalizeTextValue(cell.caption)}
+                                    </span>
                                   </span>
-                                </span>
-                              ) : null}
-                            </div>
-                          ))}
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     </div>
+                  ) : (
+                    <div className="professional-export-stage professional-export-stage-placeholder">
+                      <p>
+                        {isMobilePerformanceMode
+                          ? "移动端默认关闭导出预览，避免重复渲染整张大画布。需要时再手动展开。"
+                          : "导出预览已隐藏，展开后会重新渲染整张导出画布。"}
+                      </p>
+                    </div>
+                  )}
+                  <div className="professional-export-download-row">
+                    <button
+                      type="button"
+                      className="primary-button professional-export-download-button"
+                      onClick={handleDownloadProfessionalExport}
+                      disabled={professionalExportPending || !professionalExportHasRenderableContent}
+                    >
+                      {professionalExportPending ? "正在导出..." : "下载 PNG"}
+                    </button>
                   </div>
                 </div>
               </>
@@ -4898,6 +5494,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                               src={professionalStyleReference.previewUrl}
                               alt={professionalStyleReference.name}
                               draggable="false"
+                              loading="lazy"
+                              decoding="async"
                             />
                           </div>
                           <div className="professional-style-reference-copy">
@@ -4999,6 +5597,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                                 src={cell.record.previewUrl}
                                 alt={`${cell.label} 生成结果`}
                                 draggable="false"
+                                loading="lazy"
+                                decoding="async"
                               />
                             ) : null}
                             <span className="storyboard-cell-index">{cell.index}</span>
@@ -5025,7 +5625,9 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </div>
                   </div>
 
-                  <div className="storyboard-style-disclosure">
+                  <div
+                    className={`storyboard-style-disclosure${storyboardImageControlsCollapsed ? "" : " is-open"}`}
+                  >
                     <button
                       type="button"
                       className={`storyboard-style-toggle${storyboardImageControlsCollapsed ? "" : " is-open"}`}
@@ -5045,86 +5647,90 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </button>
 
                     {!storyboardImageControlsCollapsed ? (
-                      <div
-                        id="storyboard-image-controls"
-                        className="layout-preview-controls storyboard-style-controls-panel"
-                        aria-label="分镜表格图片设置"
-                      >
-                        <label
-                          className="image-option-field storyboard-model-field"
-                          htmlFor="bananaModelSelector"
+                      <div className="storyboard-style-controls-shell">
+                        <div
+                          id="storyboard-image-controls"
+                          className="layout-preview-controls storyboard-style-controls-panel"
+                          aria-label="分镜表格图片设置"
                         >
-                          <span className="field-label">底模选择</span>
-                          <select
-                            id="bananaModelSelector"
-                            name="bananaModelSelector"
-                            className="model-selector compact-selector"
-                            value={professionalSelectedModelId}
-                            onChange={(event) => setProfessionalSelectedModelId(event.target.value)}
+                          <label
+                            className="image-option-field storyboard-model-field"
+                            htmlFor="bananaModelSelector"
                           >
-                            {models.map((model) => (
-                              <option key={model.id} value={model.id}>
-                                {model.name} · {model.priceLabel}
-                              </option>
-                            ))}
-                          </select>
-                          {selectedModel ? (
-                            <small className="model-helper-text">{selectedModel.description}</small>
-                          ) : null}
-                        </label>
+                            <span className="field-label">底模选择</span>
+                            <select
+                              id="bananaModelSelector"
+                              name="bananaModelSelector"
+                              className="model-selector compact-selector"
+                              value={professionalSelectedModelId}
+                              onChange={(event) => setProfessionalSelectedModelId(event.target.value)}
+                            >
+                              {models.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.name} · {model.priceLabel}
+                                </option>
+                              ))}
+                            </select>
+                            {selectedModel ? (
+                              <small className="model-helper-text">{selectedModel.description}</small>
+                            ) : null}
+                          </label>
 
-                        <label
-                          className="image-option-field"
-                          htmlFor="storyboardGlobalAspectRatio"
-                        >
-                          <span className="field-label">图片比例</span>
-                          <select
-                            id="storyboardGlobalAspectRatio"
-                            name="storyboardGlobalAspectRatio"
-                            className="model-selector compact-selector"
-                            value={professionalStoryboardAspectRatioValue}
-                            onChange={(event) =>
-                              setProfessionalStoryboardAspectRatio(
-                                normalizeAspectRatioValue(event.target.value),
-                              )
-                            }
+                          <label
+                            className="image-option-field"
+                            htmlFor="storyboardGlobalAspectRatio"
                           >
-                            {availableAspectRatioOptions.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                            <span className="field-label">图片比例</span>
+                            <select
+                              id="storyboardGlobalAspectRatio"
+                              name="storyboardGlobalAspectRatio"
+                              className="model-selector compact-selector"
+                              value={professionalStoryboardAspectRatioValue}
+                              onChange={(event) =>
+                                setProfessionalStoryboardAspectRatio(
+                                  normalizeAspectRatioValue(event.target.value),
+                                )
+                              }
+                            >
+                              {availableAspectRatioOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
 
-                        <label
-                          className="image-option-field"
-                          htmlFor="storyboardGlobalImageSize"
-                        >
-                          <span className="field-label">分辨率</span>
-                          <select
-                            id="storyboardGlobalImageSize"
-                            name="storyboardGlobalImageSize"
-                            className="model-selector compact-selector"
-                            value={professionalStoryboardImageSizeValue}
-                            onChange={(event) =>
-                              setProfessionalStoryboardImageSize(
-                                normalizeImageSizeValue(event.target.value),
-                              )
-                            }
+                          <label
+                            className="image-option-field"
+                            htmlFor="storyboardGlobalImageSize"
                           >
-                            {availableImageSizeOptions.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                            <span className="field-label">分辨率</span>
+                            <select
+                              id="storyboardGlobalImageSize"
+                              name="storyboardGlobalImageSize"
+                              className="model-selector compact-selector"
+                              value={professionalStoryboardImageSizeValue}
+                              onChange={(event) =>
+                                setProfessionalStoryboardImageSize(
+                                  normalizeImageSizeValue(event.target.value),
+                                )
+                              }
+                            >
+                              {availableImageSizeOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
                       </div>
                     ) : null}
                   </div>
 
-                  <div className="storyboard-style-disclosure">
+                  <div
+                    className={`storyboard-style-disclosure${storyboardStyleControlsCollapsed ? "" : " is-open"}`}
+                  >
                     <button
                       type="button"
                       className={`storyboard-style-toggle${storyboardStyleControlsCollapsed ? "" : " is-open"}`}
@@ -5144,96 +5750,98 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </button>
 
                     {!storyboardStyleControlsCollapsed ? (
-                      <div
-                        id="storyboard-style-controls"
-                        className="layout-preview-controls storyboard-style-controls-panel"
-                        aria-label="分镜表格样式设置"
-                      >
-                        <label className="image-option-field layout-track-field" htmlFor="layoutRows">
-                          <span className="field-label">行数</span>
-                          <select
-                            id="layoutRows"
-                            name="layoutRows"
-                            className="model-selector compact-selector"
-                            value={professionalLayoutRows}
-                            onChange={(event) =>
-                              setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
-                            }
-                          >
-                            {LAYOUT_TRACK_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-
-                        <label className="image-option-field layout-track-field" htmlFor="layoutColumns">
-                          <span className="field-label">列数</span>
-                          <select
-                            id="layoutColumns"
-                            name="layoutColumns"
-                            className="model-selector compact-selector"
-                            value={professionalLayoutColumns}
-                            onChange={(event) =>
-                              setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
-                            }
-                          >
-                            {LAYOUT_TRACK_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-
-                        <label
-                          className="image-option-field compact-range-field"
-                          htmlFor="storyboardDividerWidth"
+                      <div className="storyboard-style-controls-shell">
+                        <div
+                          id="storyboard-style-controls"
+                          className="layout-preview-controls storyboard-style-controls-panel"
+                          aria-label="分镜表格样式设置"
                         >
-                          <span className="field-label">
-                            分割线
-                            <strong>{professionalStoryboardDividerWidthPx}px</strong>
-                          </span>
-                          <input
-                            id="storyboardDividerWidth"
-                            name="storyboardDividerWidth"
-                            type="range"
-                            min={MIN_STORYBOARD_DIVIDER_WIDTH_PX}
-                            max={MAX_STORYBOARD_DIVIDER_WIDTH_PX}
-                            step="1"
-                            value={professionalStoryboardDividerWidthPx}
-                            onChange={(event) =>
-                              setProfessionalStoryboardDividerWidthPx(
-                                normalizeStoryboardDividerWidthPx(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
+                          <label className="image-option-field layout-track-field" htmlFor="layoutRows">
+                            <span className="field-label">行数</span>
+                            <select
+                              id="layoutRows"
+                              name="layoutRows"
+                              className="model-selector compact-selector"
+                              value={professionalLayoutRows}
+                              onChange={(event) =>
+                                setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
+                              }
+                            >
+                              {LAYOUT_TRACK_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
 
-                        <label
-                          className="image-option-field compact-range-field"
-                          htmlFor="storyboardCaptionFontSize"
-                        >
-                          <span className="field-label">
-                            配文字号
-                            <strong>{professionalStoryboardCaptionFontSizePercent}%</strong>
-                          </span>
-                          <input
-                            id="storyboardCaptionFontSize"
-                            name="storyboardCaptionFontSize"
-                            type="range"
-                            min={MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
-                            max={MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
-                            step="5"
-                            value={professionalStoryboardCaptionFontSizePercent}
-                            onChange={(event) =>
-                              setProfessionalStoryboardCaptionFontSizePercent(
-                                normalizeStoryboardCaptionFontSizePercent(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
+                          <label className="image-option-field layout-track-field" htmlFor="layoutColumns">
+                            <span className="field-label">列数</span>
+                            <select
+                              id="layoutColumns"
+                              name="layoutColumns"
+                              className="model-selector compact-selector"
+                              value={professionalLayoutColumns}
+                              onChange={(event) =>
+                                setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
+                              }
+                            >
+                              {LAYOUT_TRACK_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label
+                            className="image-option-field compact-range-field"
+                            htmlFor="storyboardDividerWidth"
+                          >
+                            <span className="field-label">
+                              分割线
+                              <strong>{professionalStoryboardDividerWidthPx}px</strong>
+                            </span>
+                            <input
+                              id="storyboardDividerWidth"
+                              name="storyboardDividerWidth"
+                              type="range"
+                              min={MIN_STORYBOARD_DIVIDER_WIDTH_PX}
+                              max={MAX_STORYBOARD_DIVIDER_WIDTH_PX}
+                              step="1"
+                              value={professionalStoryboardDividerWidthPx}
+                              onChange={(event) =>
+                                setProfessionalStoryboardDividerWidthPx(
+                                  normalizeStoryboardDividerWidthPx(event.target.value),
+                                )
+                              }
+                            />
+                          </label>
+
+                          <label
+                            className="image-option-field compact-range-field"
+                            htmlFor="storyboardCaptionFontSize"
+                          >
+                            <span className="field-label">
+                              配文字号
+                              <strong>{professionalStoryboardCaptionFontSizePercent}%</strong>
+                            </span>
+                            <input
+                              id="storyboardCaptionFontSize"
+                              name="storyboardCaptionFontSize"
+                              type="range"
+                              min={MIN_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                              max={MAX_STORYBOARD_CAPTION_FONT_SIZE_PERCENT}
+                              step="5"
+                              value={professionalStoryboardCaptionFontSizePercent}
+                              onChange={(event) =>
+                                setProfessionalStoryboardCaptionFontSizePercent(
+                                  normalizeStoryboardCaptionFontSizePercent(event.target.value),
+                                )
+                              }
+                            />
+                          </label>
+                        </div>
                       </div>
                     ) : null}
                   </div>
@@ -5616,6 +6224,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                               src={storyboardEditorCell.referenceImages[0].previewUrl}
                               alt={storyboardEditorCell.referenceImages[0].name}
                               draggable="false"
+                              loading="lazy"
+                              decoding="async"
                             />
                           </div>
                           <div className="professional-style-reference-copy">
@@ -5727,7 +6337,13 @@ function BananaStudioApp({ routeMode = "login" }) {
                                 onClick={() => handleSelectStoryboardLibraryRecord(record)}
                               >
                                 <span className="storyboard-library-item-media">
-                                  <img src={record.previewUrl} alt={fileTitle} draggable="false" />
+                                  <img
+                                    src={record.previewUrl}
+                                    alt={fileTitle}
+                                    draggable="false"
+                                    loading="lazy"
+                                    decoding="async"
+                                  />
                                 </span>
                                 <span className="storyboard-library-item-copy">
                                   <strong title={fileTitle}>{fileTitle}</strong>
@@ -5808,6 +6424,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                       src={storyboardEditorCell.record.previewUrl}
                       alt={`${storyboardEditorCell.label} 生成结果`}
                       draggable="false"
+                      decoding="async"
                     />
                   </button>
                 ) : (
@@ -6066,6 +6683,7 @@ function BananaStudioApp({ routeMode = "login" }) {
               src={previewRecord.previewUrl}
               alt="Banana generated preview"
               draggable="false"
+              decoding="async"
               onLoad={(event) => {
                 setImagePreviewNaturalSize({
                   width: event.currentTarget.naturalWidth,
@@ -6146,6 +6764,9 @@ function App() {
     typeof window !== "undefined" && typeof window.location?.pathname === "string"
       ? window.location.pathname
       : "/";
+  const isE2eStudioRoute =
+    import.meta.env.DEV &&
+    normalizeTextValue(readSearchParam("e2e")) === "1";
 
   if (pathname === "/admin" || pathname.startsWith("/admin/")) {
     return <AdminApp />;
@@ -6156,7 +6777,7 @@ function App() {
   }
 
   if (pathname === LOGIN_PATH || pathname.startsWith(`${LOGIN_PATH}/`)) {
-    return <BananaStudioApp routeMode="login" />;
+    return <BananaStudioApp routeMode={isE2eStudioRoute ? "studio" : "login"} />;
   }
 
   if (pathname === STUDIO_PATH || pathname.startsWith(`${STUDIO_PATH}/`)) {
