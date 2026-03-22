@@ -546,6 +546,106 @@ function formatStoryboardPromptPreview(value) {
   return text.length > 40 ? `${text.slice(0, 40)}...` : text;
 }
 
+function getAspectRatioNumber(value) {
+  const { width, height } = parseAspectRatio(value);
+  return width / height;
+}
+
+function calculateCoverCropFraction(imageAspectRatio, frameAspectRatio) {
+  if (
+    !Number.isFinite(imageAspectRatio) ||
+    !Number.isFinite(frameAspectRatio) ||
+    imageAspectRatio <= 0 ||
+    frameAspectRatio <= 0
+  ) {
+    return 1;
+  }
+
+  const visibleFraction = Math.min(
+    imageAspectRatio / frameAspectRatio,
+    frameAspectRatio / imageAspectRatio,
+  );
+
+  return 1 - Math.min(Math.max(visibleFraction, 0), 1);
+}
+
+function findRecommendedStoryboardAspectRatioOption(options, frameAspectRatio) {
+  if (!Array.isArray(options) || options.length === 0 || !Number.isFinite(frameAspectRatio)) {
+    return null;
+  }
+
+  return options.reduce((bestMatch, option) => {
+    const optionAspectRatio = getAspectRatioNumber(option.value);
+    const cropFraction = calculateCoverCropFraction(optionAspectRatio, frameAspectRatio);
+
+    if (!bestMatch) {
+      return {
+        option,
+        aspectRatio: optionAspectRatio,
+        cropFraction,
+      };
+    }
+
+    if (cropFraction < bestMatch.cropFraction - 0.000001) {
+      return {
+        option,
+        aspectRatio: optionAspectRatio,
+        cropFraction,
+      };
+    }
+
+    if (
+      Math.abs(cropFraction - bestMatch.cropFraction) <= 0.000001 &&
+      Math.abs(optionAspectRatio - frameAspectRatio) <
+        Math.abs(bestMatch.aspectRatio - frameAspectRatio)
+    ) {
+      return {
+        option,
+        aspectRatio: optionAspectRatio,
+        cropFraction,
+      };
+    }
+
+    return bestMatch;
+  }, null);
+}
+
+function findRecommendedStoryboardAspectRatioForLayout({
+  options,
+  canvasWidth,
+  canvasHeight,
+  rows,
+  columns,
+}) {
+  if (!Array.isArray(options) || options.length === 0) {
+    return null;
+  }
+
+  const metrics = getProfessionalExportLayoutMetrics({
+    canvasWidth,
+    canvasHeight,
+    rows,
+    columns,
+  });
+  const frameAspectRatio = (metrics?.cellWidth || 1) / (metrics?.cellHeight || 1);
+
+  return findRecommendedStoryboardAspectRatioOption(options, frameAspectRatio);
+}
+
+function formatCropPercentValue(value) {
+  const safeValue = Math.max(0, value) * 100;
+
+  if (safeValue >= 10) {
+    return `${safeValue.toFixed(0)}%`;
+  }
+
+  if (safeValue >= 1) {
+    return `${safeValue.toFixed(1)}%`;
+  }
+
+  return `${safeValue.toFixed(2)}%`;
+}
+
 function buildStoryboardCellClassName(
   cell,
   { dragDisabled = false, isDragging = false, isDropTarget = false, isOverlay = false } = {},
@@ -2946,6 +3046,22 @@ function BananaStudioApp({ routeMode = "login" }) {
     professionalDefaultCellImageSize,
     professionalStoryboardImageSize,
   ]);
+  const storyboardCellAspectRatio = useMemo(() => {
+    const cellWidth = professionalExportMetrics?.cellWidth || 1;
+    const cellHeight = professionalExportMetrics?.cellHeight || 1;
+    return cellWidth / cellHeight;
+  }, [professionalExportMetrics]);
+  const recommendedStoryboardAspectRatio = useMemo(
+    () =>
+      findRecommendedStoryboardAspectRatioOption(
+        availableAspectRatioOptions,
+        storyboardCellAspectRatio,
+      ),
+    [availableAspectRatioOptions, storyboardCellAspectRatio],
+  );
+  const canApplyRecommendedStoryboardAspectRatio =
+    recommendedStoryboardAspectRatio &&
+    recommendedStoryboardAspectRatio.option.value !== professionalStoryboardAspectRatioValue;
   const storyboardCellList = useMemo(
     () =>
       storyboardCellDefinitions.map(
@@ -4133,10 +4249,29 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   function handleProfessionalScenarioChange(value) {
     const scenario = getCanvasScenarioOption(value, professionalCustomScenarios);
+    const nextRows = clampLayoutTrack(scenario.layoutRows);
+    const nextColumns = clampLayoutTrack(scenario.layoutColumns);
+    const nextRecommendedAspectRatio = findRecommendedStoryboardAspectRatioForLayout({
+      options: availableAspectRatioOptions,
+      canvasWidth:
+        scenario.value === CUSTOM_CANVAS_SIZE_VALUE
+          ? professionalCustomCanvasWidth
+          : scenario.width,
+      canvasHeight:
+        scenario.value === CUSTOM_CANVAS_SIZE_VALUE
+          ? professionalCustomCanvasHeight
+          : scenario.height,
+      rows: nextRows,
+      columns: nextColumns,
+    });
 
     setProfessionalCanvasSize(scenario.value);
-    setProfessionalLayoutRows(clampLayoutTrack(scenario.layoutRows));
-    setProfessionalLayoutColumns(clampLayoutTrack(scenario.layoutColumns));
+    setProfessionalLayoutRows(nextRows);
+    setProfessionalLayoutColumns(nextColumns);
+
+    if (nextRecommendedAspectRatio?.option?.value) {
+      setProfessionalStoryboardAspectRatio(nextRecommendedAspectRatio.option.value);
+    }
   }
 
   function buildScenarioManagerDraft(sourceScenario = null) {
@@ -4279,6 +4414,18 @@ function BananaStudioApp({ routeMode = "login" }) {
     setProfessionalCanvasSize(nextScenario.value);
     setProfessionalLayoutRows(nextScenario.layoutRows);
     setProfessionalLayoutColumns(nextScenario.layoutColumns);
+    const nextRecommendedAspectRatio = findRecommendedStoryboardAspectRatioForLayout({
+      options: availableAspectRatioOptions,
+      canvasWidth: nextScenario.width,
+      canvasHeight: nextScenario.height,
+      rows: nextScenario.layoutRows,
+      columns: nextScenario.layoutColumns,
+    });
+
+    if (nextRecommendedAspectRatio?.option?.value) {
+      setProfessionalStoryboardAspectRatio(nextRecommendedAspectRatio.option.value);
+    }
+
     setStudioError("");
   }
 
@@ -5924,7 +6071,18 @@ function BananaStudioApp({ routeMode = "login" }) {
                             className="image-option-field"
                             htmlFor="storyboardGlobalAspectRatio"
                           >
-                            <span className="field-label">图片比例</span>
+                            <span className="field-label-inline">
+                              <span className="field-label">图片比例</span>
+                              {recommendedStoryboardAspectRatio ? (
+                                <small className="field-label-recommendation">
+                                  推荐比例 {recommendedStoryboardAspectRatio.option.value}
+                                  {recommendedStoryboardAspectRatio.option.value ===
+                                  professionalStoryboardAspectRatioValue
+                                    ? "（当前）"
+                                    : ""}
+                                </small>
+                              ) : null}
+                            </span>
                             <select
                               id="storyboardGlobalAspectRatio"
                               name="storyboardGlobalAspectRatio"
@@ -5942,6 +6100,28 @@ function BananaStudioApp({ routeMode = "login" }) {
                                 </option>
                               ))}
                             </select>
+                            {recommendedStoryboardAspectRatio ? (
+                              <div className="field-helper-row">
+                                <small className="field-helper-text">
+                                  按当前分镜单格的实际长宽比计算，选择{" "}
+                                  {recommendedStoryboardAspectRatio.option.label} 时预计裁剪最少
+                                  （约 {formatCropPercentValue(recommendedStoryboardAspectRatio.cropFraction)}）。
+                                </small>
+                                {canApplyRecommendedStoryboardAspectRatio ? (
+                                  <button
+                                    type="button"
+                                    className="ghost-button field-helper-action"
+                                    onClick={() =>
+                                      setProfessionalStoryboardAspectRatio(
+                                        recommendedStoryboardAspectRatio.option.value,
+                                      )
+                                    }
+                                  >
+                                    一键应用
+                                  </button>
+                                ) : null}
+                              </div>
+                            ) : null}
                           </label>
 
                           <label
@@ -6007,9 +6187,25 @@ function BananaStudioApp({ routeMode = "login" }) {
                               name="layoutRows"
                               className="model-selector compact-selector"
                               value={professionalLayoutRows}
-                              onChange={(event) =>
-                                setProfessionalLayoutRows(clampLayoutTrack(event.target.value))
-                              }
+                              onChange={(event) => {
+                                const nextRows = clampLayoutTrack(event.target.value);
+                                const nextRecommendedAspectRatio =
+                                  findRecommendedStoryboardAspectRatioForLayout({
+                                    options: availableAspectRatioOptions,
+                                    canvasWidth: professionalCanvasSizeOption.width,
+                                    canvasHeight: professionalCanvasSizeOption.height,
+                                    rows: nextRows,
+                                    columns: professionalLayoutColumns,
+                                  });
+
+                                setProfessionalLayoutRows(nextRows);
+
+                                if (nextRecommendedAspectRatio?.option?.value) {
+                                  setProfessionalStoryboardAspectRatio(
+                                    nextRecommendedAspectRatio.option.value,
+                                  );
+                                }
+                              }}
                             >
                               {LAYOUT_TRACK_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>
@@ -6026,9 +6222,25 @@ function BananaStudioApp({ routeMode = "login" }) {
                               name="layoutColumns"
                               className="model-selector compact-selector"
                               value={professionalLayoutColumns}
-                              onChange={(event) =>
-                                setProfessionalLayoutColumns(clampLayoutTrack(event.target.value))
-                              }
+                              onChange={(event) => {
+                                const nextColumns = clampLayoutTrack(event.target.value);
+                                const nextRecommendedAspectRatio =
+                                  findRecommendedStoryboardAspectRatioForLayout({
+                                    options: availableAspectRatioOptions,
+                                    canvasWidth: professionalCanvasSizeOption.width,
+                                    canvasHeight: professionalCanvasSizeOption.height,
+                                    rows: professionalLayoutRows,
+                                    columns: nextColumns,
+                                  });
+
+                                setProfessionalLayoutColumns(nextColumns);
+
+                                if (nextRecommendedAspectRatio?.option?.value) {
+                                  setProfessionalStoryboardAspectRatio(
+                                    nextRecommendedAspectRatio.option.value,
+                                  );
+                                }
+                              }}
                             >
                               {LAYOUT_TRACK_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>

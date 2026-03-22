@@ -272,6 +272,14 @@ h2 {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.field-label-recommendation {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .gate-form input,
@@ -523,6 +531,34 @@ textarea:focus {
   color: var(--muted);
   font-size: 0.88rem;
   font-weight: 500;
+}
+
+.field-helper-text {
+  margin-top: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.field-helper-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.field-helper-row .field-helper-text {
+  flex: 1 1 220px;
+}
+
+.field-helper-action {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  line-height: 1.2;
 }
 
 .image-option-field {
