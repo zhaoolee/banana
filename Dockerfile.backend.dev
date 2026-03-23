@@ -4,8 +4,11 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN apt-get update && apt-get install -y --no-install-recommends fontconfig && rm -rf /var/lib/apt/lists/*
 RUN npm ci
 RUN npx playwright install --with-deps chromium
+COPY server/assets/fonts /usr/local/share/fonts/opposans
+RUN fc-cache -f -v
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV PORT=3001

@@ -16,8 +16,11 @@ ENV NODE_ENV=production
 ENV PORT=23001
 
 COPY package.json package-lock.json ./
+RUN apt-get update && apt-get install -y --no-install-recommends fontconfig && rm -rf /var/lib/apt/lists/*
 RUN npm ci --omit=dev
 RUN npx playwright install --with-deps chromium
+COPY server/assets/fonts /usr/local/share/fonts/opposans
+RUN fc-cache -f -v
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server ./server

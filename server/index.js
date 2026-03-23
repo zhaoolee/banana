@@ -1899,7 +1899,7 @@ function renderProfessionalExportHtml(payload) {
       <style>
         :root {
           color-scheme: light;
-          font-family: "Avenir Next", "PingFang SC", "Helvetica Neue", sans-serif;
+          font-family: "OPPOSans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
           line-height: 1.5;
           font-weight: 400;
         }
@@ -1967,7 +1967,7 @@ function renderProfessionalExportHtml(payload) {
           box-decoration-break: clone;
           -webkit-box-decoration-break: clone;
           color: #ffffff;
-          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+          font-family: "OPPOSans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
           font-size: ${captionFontSize * captionFontScale}px;
           line-height: 1.24;
           font-weight: 800;
