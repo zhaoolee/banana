@@ -47,6 +47,7 @@ const PROFESSIONAL_SELECTED_IMAGE_SIZE_STORAGE_KEY = "banana.professional.select
 const PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY = "banana.professional.selectedImageCount";
 const PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY = "professionalStoryboardCells";
 const PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY = "professionalReferenceImages";
+const SIMPLE_REFERENCE_IMAGES_STORAGE_KEY = "simpleReferenceImages";
 const SIMPLE_PROMPT_STORAGE_KEY = "banana.simple.prompt";
 const LAST_GENERATION_DB_NAME = "banana.studio";
 const LAST_GENERATION_STORE_NAME = "app";
@@ -55,6 +56,12 @@ const GENERATION_LIBRARY_RECORDS_KEY = "generationLibraryRecords";
 const LAST_GENERATION_RECORD_ID_KEY = "lastGenerationRecordId";
 const MAX_REFERENCE_IMAGES = 12;
 const MAX_LAYOUT_TRACKS = 8;
+const VERTEX_INLINE_IMAGE_MAX_BYTES = 7 * 1024 * 1024;
+const REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES = Math.floor(VERTEX_INLINE_IMAGE_MAX_BYTES * 0.78);
+const REFERENCE_IMAGE_MAX_LONG_EDGE_PX = 2560;
+const REFERENCE_IMAGE_MIN_LONG_EDGE_PX = 1280;
+const REFERENCE_IMAGE_JPEG_QUALITY_STEPS = [0.82, 0.76, 0.7, 0.64, 0.58];
+const REFERENCE_IMAGE_RESIZE_STEPS = [1, 0.9, 0.82, 0.74];
 const PROMPT_TEXTAREA_MIN_ROWS = 2;
 const PROMPT_TEXTAREA_MAX_ROWS = 5;
 const PANEL_MODE_SIMPLE = "simple";
@@ -79,6 +86,8 @@ const DEFAULT_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 90;
 const MIN_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 72;
 const MAX_STORYBOARD_CAPTION_BACKGROUND_ALPHA_PERCENT = 100;
 const STORYBOARD_DRAG_ACTIVATION_DISTANCE_PX = 6;
+const STORYBOARD_MOBILE_DRAG_ACTIVATION_DELAY_MS = 220;
+const STORYBOARD_MOBILE_DRAG_TOLERANCE_PX = 8;
 const STORYBOARD_DRAG_CLICK_SUPPRESSION_MS = 240;
 const SIMPLE_PANEL_DEFAULTS = {
   modelId: "nano-banana-2",
@@ -466,6 +475,15 @@ function createStoryboardCellState(definition) {
   };
 }
 
+function doesStoryboardCellHaveContent(cell) {
+  return Boolean(
+    normalizeTextValue(cell?.prompt) ||
+      normalizeTextValue(cell?.caption) ||
+      (Array.isArray(cell?.referenceImages) && cell.referenceImages.length > 0) ||
+      cell?.record,
+  );
+}
+
 function buildStoryboardCellContentSnapshot(cell) {
   return {
     prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
@@ -648,9 +666,15 @@ function formatCropPercentValue(value) {
 
 function buildStoryboardCellClassName(
   cell,
-  { dragDisabled = false, isDragging = false, isDropTarget = false, isOverlay = false } = {},
+  {
+    dragDisabled = false,
+    isDragging = false,
+    isDropTarget = false,
+    isOverlay = false,
+    hasMobileDragHandle = false,
+  } = {},
 ) {
-  return `storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}${dragDisabled ? " is-drag-disabled" : ""}${isDragging ? " is-dragging" : ""}${isDropTarget ? " is-drop-target" : ""}${isOverlay ? " is-overlay" : ""}`;
+  return `storyboard-cell is-${cell.status}${cell.record ? " has-image" : ""}${normalizeTextValue(cell.caption) ? " has-caption" : ""}${dragDisabled ? " is-drag-disabled" : ""}${isDragging ? " is-dragging" : ""}${isDropTarget ? " is-drop-target" : ""}${isOverlay ? " is-overlay" : ""}${hasMobileDragHandle ? " has-mobile-drag-handle" : ""}`;
 }
 
 function buildStoryboardCellTransformStyle(transform, transition) {
@@ -713,32 +737,103 @@ function StoryboardCellContent({ cell }) {
   );
 }
 
-function SortableStoryboardCell({ cell, dragDisabled = false, onOpen }) {
-  const { attributes, isDragging, isOver, listeners, setNodeRef, transform, transition } =
-    useSortable({
-      id: cell.id,
-      disabled: dragDisabled,
-    });
+function SortableStoryboardCell({
+  cell,
+  dragDisabled = false,
+  dragHandleOnly = false,
+  onOpen,
+  onClear,
+}) {
+  const {
+    attributes,
+    isDragging,
+    isOver,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({
+    id: cell.id,
+    disabled: dragDisabled,
+  });
+  const hasContent = doesStoryboardCellHaveContent(cell);
+  const dragActivatorProps = !dragDisabled
+    ? {
+        ...attributes,
+        ...listeners,
+      }
+    : {};
+  const cardDragActivatorProps = dragHandleOnly ? {} : dragActivatorProps;
+  const handleDragActivatorProps = dragHandleOnly ? dragActivatorProps : {};
 
   return (
-    <button
+    <div
       ref={setNodeRef}
-      type="button"
-      role="gridcell"
-      className={buildStoryboardCellClassName(cell, {
-        dragDisabled,
-        isDragging,
-        isDropTarget: isOver && !isDragging,
-      })}
+      className="storyboard-cell-shell"
       style={buildStoryboardCellTransformStyle(transform, transition)}
-      onClick={() => onOpen(cell.id)}
-      aria-label={`${cell.label}${dragDisabled ? "，生成中暂不可拖拽" : "，可拖拽调整顺序"}${cell.status === "loading" ? "，生成中" : ""}`}
-      aria-roledescription="可拖拽分镜格"
-      {...attributes}
-      {...listeners}
     >
-      <StoryboardCellContent cell={cell} />
-    </button>
+      <button
+        type="button"
+        role="gridcell"
+        className={buildStoryboardCellClassName(cell, {
+          dragDisabled,
+          hasMobileDragHandle: dragHandleOnly,
+          isDragging,
+          isDropTarget: isOver && !isDragging,
+        })}
+        onClick={() => onOpen(cell.id)}
+        aria-label={`${cell.label}${dragHandleOnly ? "，点击打开编辑，拖拽请使用排序手柄" : dragDisabled ? "，生成中暂不可拖拽" : "，可拖拽调整顺序"}${cell.status === "loading" ? "，生成中" : ""}`}
+        aria-roledescription={dragHandleOnly ? "分镜格" : "可拖拽分镜格"}
+        ref={dragHandleOnly ? undefined : setActivatorNodeRef}
+        {...cardDragActivatorProps}
+      >
+        <StoryboardCellContent cell={cell} />
+      </button>
+      {dragHandleOnly ? (
+        <button
+          ref={setActivatorNodeRef}
+          type="button"
+          className="storyboard-cell-drag-handle"
+          aria-label={`${cell.label}排序手柄，长按后拖拽调整顺序`}
+          title={`拖拽调整${cell.label}顺序`}
+          disabled={dragDisabled}
+          {...handleDragActivatorProps}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="7" cy="6" r="1.2" />
+            <circle cx="13" cy="6" r="1.2" />
+            <circle cx="7" cy="10" r="1.2" />
+            <circle cx="13" cy="10" r="1.2" />
+            <circle cx="7" cy="14" r="1.2" />
+            <circle cx="13" cy="14" r="1.2" />
+          </svg>
+        </button>
+      ) : null}
+      {hasContent ? (
+        <button
+          type="button"
+          className="storyboard-cell-clear-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onClear(cell.id);
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onTouchStart={(event) => event.stopPropagation()}
+          aria-label={`清空${cell.label}内容`}
+          title={`清空${cell.label}内容`}
+          disabled={dragDisabled}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+            <path d="M4 6h12" />
+            <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+            <path d="M8 9v4.5" />
+            <path d="M12 9v4.5" />
+          </svg>
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -1225,6 +1320,235 @@ function formatBytes(bytes) {
   return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} MB`;
 }
 
+function getReferenceImageOptimizationSummary(image) {
+  if (
+    !image?.optimized ||
+    !Number.isFinite(image?.originalSize) ||
+    !Number.isFinite(image?.size) ||
+    image.originalSize <= image.size
+  ) {
+    return "";
+  }
+
+  return `已自动优化上传：${formatBytes(image.originalSize)} -> ${formatBytes(image.size)}。`;
+}
+
+function buildReferenceUploadFileName(name, mimeType) {
+  const trimmedName = typeof name === "string" ? name.trim() : "";
+  const safeBaseName = (trimmedName || "reference-image").replace(/\.[^./\\]+$/, "");
+  return `${safeBaseName}.${getFileExtensionFromMimeType(mimeType)}`;
+}
+
+function ensureClipboardImageFileName(file, index = 0) {
+  if (!(file instanceof File)) {
+    return null;
+  }
+
+  const trimmedName = typeof file.name === "string" ? file.name.trim() : "";
+
+  if (trimmedName) {
+    return file;
+  }
+
+  const mimeType = file.type || "image/png";
+
+  return new File(
+    [file],
+    `clipboard-image-${Date.now()}-${index + 1}.${getFileExtensionFromMimeType(mimeType)}`,
+    {
+      type: mimeType,
+      lastModified: file.lastModified || Date.now(),
+    },
+  );
+}
+
+function getImageFilesFromClipboardData(clipboardData) {
+  if (!clipboardData) {
+    return [];
+  }
+
+  const itemFiles = Array.from(clipboardData.items || [])
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item, index) => ensureClipboardImageFileName(item.getAsFile(), index))
+    .filter(Boolean);
+
+  if (itemFiles.length > 0) {
+    return itemFiles;
+  }
+
+  return Array.from(clipboardData.files || [])
+    .filter((file) => file.type.startsWith("image/"))
+    .map((file, index) => ensureClipboardImageFileName(file, index))
+    .filter(Boolean);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElementFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("图片解析失败，无法自动优化这张参考图"));
+    image.decoding = "async";
+    image.src = url;
+  });
+}
+
+function canvasToBlob(canvas, mimeType, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+        return;
+      }
+
+      reject(new Error("图片压缩失败，请重试"));
+    }, mimeType, quality);
+  });
+}
+
+function getScaledDimensions(width, height, scale) {
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+async function optimizeReferenceImageFile(
+  file,
+  {
+    targetBytes = REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES,
+    hardLimitBytes = VERTEX_INLINE_IMAGE_MAX_BYTES,
+    maxLongEdge = REFERENCE_IMAGE_MAX_LONG_EDGE_PX,
+    minLongEdge = REFERENCE_IMAGE_MIN_LONG_EDGE_PX,
+  } = {},
+) {
+  if (!file || file.size <= targetBytes) {
+    return {
+      file,
+      optimized: false,
+      originalSize: file?.size || 0,
+      outputSize: file?.size || 0,
+    };
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await loadImageElementFromUrl(objectUrl);
+    const naturalWidth = image.naturalWidth || 0;
+    const naturalHeight = image.naturalHeight || 0;
+    const sourceLongEdge = Math.max(naturalWidth, naturalHeight);
+
+    if (!sourceLongEdge) {
+      throw new Error("图片尺寸无效，无法自动优化这张参考图");
+    }
+
+    const maxLongEdgeScale = sourceLongEdge > maxLongEdge ? maxLongEdge / sourceLongEdge : 1;
+    const minLongEdgeScale = sourceLongEdge > minLongEdge ? minLongEdge / sourceLongEdge : 1;
+    const candidateScales = Array.from(
+      new Set(
+        REFERENCE_IMAGE_RESIZE_STEPS.map((step) =>
+          Math.max(minLongEdgeScale, Math.min(1, maxLongEdgeScale * step)),
+        ),
+      ),
+    );
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      throw new Error("当前浏览器不支持参考图自动优化，请换一个浏览器后重试");
+    }
+
+    let bestBlob = null;
+
+    for (const scale of candidateScales) {
+      const { width, height } = getScaledDimensions(naturalWidth, naturalHeight, scale);
+      canvas.width = width;
+      canvas.height = height;
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+
+      if (file.type === "image/png") {
+        const pngBlob = await canvasToBlob(canvas, "image/png");
+
+        if (!bestBlob || pngBlob.size < bestBlob.size) {
+          bestBlob = pngBlob;
+        }
+
+        if (pngBlob.size <= targetBytes) {
+          break;
+        }
+      }
+
+      for (const quality of REFERENCE_IMAGE_JPEG_QUALITY_STEPS) {
+        const jpegBlob = await canvasToBlob(canvas, "image/jpeg", quality);
+
+        if (!bestBlob || jpegBlob.size < bestBlob.size) {
+          bestBlob = jpegBlob;
+        }
+
+        if (jpegBlob.size <= targetBytes) {
+          break;
+        }
+      }
+
+      if (bestBlob?.size <= targetBytes) {
+        break;
+      }
+    }
+
+    if (!bestBlob || bestBlob.size >= file.size) {
+      if (file.size > hardLimitBytes) {
+        throw new Error("这张图片过大，自动优化后仍无法稳定上传，请换一张更小的图片");
+      }
+
+      return {
+        file,
+        optimized: false,
+        originalSize: file.size,
+        outputSize: file.size,
+      };
+    }
+
+    if (bestBlob.size > hardLimitBytes) {
+      throw new Error("这张图片过大，自动优化后仍超过 7MB，请换一张更小的图片");
+    }
+
+    return {
+      file: new File([bestBlob], buildReferenceUploadFileName(file.name, bestBlob.type), {
+        type: bestBlob.type || "image/jpeg",
+        lastModified: file.lastModified,
+      }),
+      optimized: true,
+      originalSize: file.size,
+      outputSize: bestBlob.size,
+    };
+  } catch (error) {
+    if (file.size <= hardLimitBytes) {
+      return {
+        file,
+        optimized: false,
+        originalSize: file.size,
+        outputSize: file.size,
+      };
+    }
+
+    throw error;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 function secondsToEstimateMs(seconds) {
   return Math.max(1000, Math.round(seconds * 1000));
 }
@@ -1252,27 +1576,29 @@ async function parseJsonResponse(response) {
   return data;
 }
 
-async function readFileAsReferenceImage(file) {
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
-    reader.readAsDataURL(file);
-  });
+async function readFileAsImagePayload(file, { optimize = false } = {}) {
+  const optimizedFileResult = optimize ? await optimizeReferenceImageFile(file) : null;
+  const fileToRead = optimizedFileResult?.file || file;
+  const dataUrl = await readFileAsDataUrl(fileToRead);
 
   const [, base64 = ""] = dataUrl.split(",", 2);
 
   return {
-    id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()
+    id: `${fileToRead.name}-${fileToRead.size}-${fileToRead.lastModified}-${Math.random()
       .toString(36)
       .slice(2)}`,
-    name: file.name,
-    size: file.size,
-    mimeType: file.type || "image/png",
+    name: fileToRead.name,
+    size: fileToRead.size,
+    originalSize: optimizedFileResult?.originalSize || file.size,
+    optimized: Boolean(optimizedFileResult?.optimized),
+    mimeType: fileToRead.type || "image/png",
     previewUrl: dataUrl,
     data: base64,
   };
+}
+
+async function readFileAsReferenceImage(file) {
+  return readFileAsImagePayload(file, { optimize: true });
 }
 
 async function readFileAsText(file) {
@@ -1286,7 +1612,7 @@ async function readFileAsText(file) {
 }
 
 async function readFileAsGenerationResultRecord(file) {
-  const image = await readFileAsReferenceImage(file);
+  const image = await readFileAsImagePayload(file);
 
   return restorePersistedGenerationResultRecord({
     id: createPersistedRecordId(),
@@ -1625,15 +1951,22 @@ function buildSimpleGenerationPayload({
   aspectRatio,
   imageSize,
   imageCount,
+  referenceImages = [],
 }) {
+  const imageOptions = {
+    imageSize,
+    imageCount,
+  };
+
+  if (typeof aspectRatio === "string" && aspectRatio) {
+    imageOptions.aspectRatio = aspectRatio;
+  }
+
   return {
     modelId,
     prompt,
-    imageOptions: {
-      aspectRatio,
-      imageSize,
-      imageCount,
-    },
+    imageOptions,
+    referenceImages,
   };
 }
 
@@ -2181,6 +2514,18 @@ async function readPersistedReferenceImages() {
   return persistedImages.map(restorePersistedReferenceImage).filter(Boolean);
 }
 
+async function readPersistedSimpleReferenceImages() {
+  const persistedImages = await generationResultStorage.getItem(
+    SIMPLE_REFERENCE_IMAGES_STORAGE_KEY,
+  );
+
+  if (!Array.isArray(persistedImages)) {
+    return [];
+  }
+
+  return persistedImages.map(restorePersistedReferenceImage).filter(Boolean);
+}
+
 async function writePersistedReferenceImages(images) {
   const persistedImages = images.map(buildPersistedReferenceImage).filter(Boolean);
 
@@ -2193,6 +2538,20 @@ async function writePersistedReferenceImages(images) {
   }
 
   await generationResultStorage.removeItem(PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY);
+}
+
+async function writePersistedSimpleReferenceImages(images) {
+  const persistedImages = images.map(buildPersistedReferenceImage).filter(Boolean);
+
+  if (persistedImages.length > 0) {
+    await generationResultStorage.setItem(
+      SIMPLE_REFERENCE_IMAGES_STORAGE_KEY,
+      persistedImages,
+    );
+    return;
+  }
+
+  await generationResultStorage.removeItem(SIMPLE_REFERENCE_IMAGES_STORAGE_KEY);
 }
 
 async function readPersistedGenerationArtifacts() {
@@ -2384,12 +2743,16 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [simplePrompt, setSimplePrompt] = useState(() =>
     readLocalValue(SIMPLE_PROMPT_STORAGE_KEY) || readLocalValue(LEGACY_PROMPT_STORAGE_KEY),
   );
+  const [simpleReferenceImages, setSimpleReferenceImages] = useState([]);
+  const [simpleReferenceImagesHydrated, setSimpleReferenceImagesHydrated] = useState(false);
+  const [simpleReferenceDisclosureOpen, setSimpleReferenceDisclosureOpen] = useState(false);
   const [referenceImages, setReferenceImages] = useState([]);
   const [referenceImagesHydrated, setReferenceImagesHydrated] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authPending, setAuthPending] = useState(false);
   const [remainingQuota, setRemainingQuota] = useState(null);
   const [studioError, setStudioError] = useState("");
+  const [studioNotice, setStudioNotice] = useState("");
   const [studioPending, setStudioPending] = useState(false);
   const [professionalExportPending, setProfessionalExportPending] = useState(false);
   const [professionalSceneTransferPending, setProfessionalSceneTransferPending] = useState(false);
@@ -2472,6 +2835,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardLibraryPickerOpen, setStoryboardLibraryPickerOpen] = useState(false);
   const [storyboardLibraryPickerPending, setStoryboardLibraryPickerPending] = useState(false);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
+  const [storyboardCellClearConfirmCellId, setStoryboardCellClearConfirmCellId] = useState("");
   const [storyboardShareCopyState, setStoryboardShareCopyState] = useState("idle");
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
   const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
@@ -2518,6 +2882,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const showProfessionalPanelControls = isProfessionalPanelMode && !isPromptFocusMode;
   const professionalSceneTransferReady =
     referenceImagesHydrated && storyboardCellsHydrated;
+  const simpleStyleReference = simpleReferenceImages[0] || null;
   const storyboardCellDefinitions = useMemo(
     () => buildStoryboardCellDefinitions(professionalLayoutRows, professionalLayoutColumns),
     [professionalLayoutColumns, professionalLayoutRows],
@@ -2566,9 +2931,14 @@ function BananaStudioApp({ routeMode = "login" }) {
   const isStoryboardEditorAssetMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET;
   const storyboardDragSensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: STORYBOARD_DRAG_ACTIVATION_DISTANCE_PX,
-      },
+      activationConstraint: isMobilePerformanceMode
+        ? {
+            delay: STORYBOARD_MOBILE_DRAG_ACTIVATION_DELAY_MS,
+            tolerance: STORYBOARD_MOBILE_DRAG_TOLERANCE_PX,
+          }
+        : {
+            distance: STORYBOARD_DRAG_ACTIVATION_DISTANCE_PX,
+          },
     }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
@@ -2786,10 +3156,16 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     async function restorePersistedImages() {
       try {
-        const [persistedCurrentRecord, persistedStoryboardCells, persistedReferenceImages] = await Promise.all([
+        const [
+          persistedCurrentRecord,
+          persistedStoryboardCells,
+          persistedReferenceImages,
+          persistedSimpleReferenceImages,
+        ] = await Promise.all([
           readPersistedCurrentGenerationRecord(),
           readPersistedStoryboardCells(),
           readPersistedReferenceImages(),
+          readPersistedSimpleReferenceImages(),
         ]);
 
         if (cancelled) {
@@ -2799,6 +3175,9 @@ function BananaStudioApp({ routeMode = "login" }) {
         setGenerationResult(persistedCurrentRecord);
         setGenerationResults(persistedCurrentRecord ? [persistedCurrentRecord] : []);
         setReferenceImages(persistedReferenceImages.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT));
+        setSimpleReferenceImages(
+          persistedSimpleReferenceImages.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT),
+        );
         setStoryboardCells(
           normalizeStoryboardCells(
             persistedStoryboardCells,
@@ -2810,6 +3189,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         console.warn("Restore persisted generation result failed:", error);
       } finally {
         if (!cancelled) {
+          setSimpleReferenceImagesHydrated(true);
           setReferenceImagesHydrated(true);
           setStoryboardCellsHydrated(true);
         }
@@ -3086,9 +3466,11 @@ function BananaStudioApp({ routeMode = "login" }) {
     storyboardEditorCellIndex >= 0 && storyboardEditorCellIndex < storyboardCellList.length - 1
       ? storyboardCellList[storyboardEditorCellIndex + 1]
       : null;
+  const storyboardCellClearConfirmCell = storyboardCellClearConfirmCellId
+    ? storyboardCells[storyboardCellClearConfirmCellId] || null
+    : null;
   const storyboardHasContent = useMemo(
-    () =>
-      storyboardCellList.some((cell) => normalizeTextValue(cell.prompt) || cell.record),
+    () => storyboardCellList.some((cell) => doesStoryboardCellHaveContent(cell)),
     [storyboardCellList],
   );
   const storyboardShareText = useMemo(() => {
@@ -3155,15 +3537,6 @@ function BananaStudioApp({ routeMode = "login" }) {
     [storyboardCellList],
   );
 
-  const simplePanelAspectRatio = useMemo(() => {
-    const simpleAspectRatioOptions = getModelAspectRatioOptions(simplePanelModel);
-
-    if (simpleAspectRatioOptions.some((option) => option.value === SIMPLE_PANEL_DEFAULTS.aspectRatio)) {
-      return SIMPLE_PANEL_DEFAULTS.aspectRatio;
-    }
-
-    return simpleAspectRatioOptions[0]?.value || "1:1";
-  }, [simplePanelModel]);
   const simplePanelImageSize = useMemo(() => {
     const simpleImageSizeOptions = getModelImageSizeOptions(simplePanelModel);
 
@@ -3175,7 +3548,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [simplePanelModel]);
   const generationModelId = isSimplePanelMode ? simplePanelModelId : professionalSelectedModelId;
   const generationAspectRatio = isSimplePanelMode
-    ? simplePanelAspectRatio
+    ? null
     : professionalStoryboardAspectRatioValue;
   const generationImageSize = isSimplePanelMode
     ? simplePanelImageSize
@@ -3407,6 +3780,22 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [storyboardCells, storyboardCellsHydrated]);
 
   useEffect(() => {
+    if (!simpleReferenceImagesHydrated || typeof window === "undefined") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void writePersistedSimpleReferenceImages(simpleReferenceImages).catch((error) => {
+        console.warn("Persist simple reference images failed:", error);
+      });
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [simpleReferenceImages, simpleReferenceImagesHydrated]);
+
+  useEffect(() => {
     if (!referenceImagesHydrated || typeof window === "undefined") {
       return;
     }
@@ -3433,6 +3822,20 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setStoryboardEditorCellId("");
   }, [storyboardCells, storyboardEditorCellId]);
+
+  useEffect(() => {
+    if (!storyboardCellClearConfirmCellId) {
+      return;
+    }
+
+    const targetCell = storyboardCells[storyboardCellClearConfirmCellId];
+
+    if (targetCell && doesStoryboardCellHaveContent(targetCell)) {
+      return;
+    }
+
+    setStoryboardCellClearConfirmCellId("");
+  }, [storyboardCellClearConfirmCellId, storyboardCells]);
 
   useEffect(() => {
     setStoryboardLibraryPickerOpen(false);
@@ -3596,6 +3999,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setStoryboardEditorCellId("");
     setStoryboardClearConfirmOpen(false);
+    setStoryboardCellClearConfirmCellId("");
   }, [isProfessionalPanelMode]);
 
   useEffect(() => {
@@ -3603,7 +4007,8 @@ function BananaStudioApp({ routeMode = "login" }) {
       (!imagePreviewOpen &&
         !resourceManagerOpen &&
         !storyboardEditorOpen &&
-        !storyboardClearConfirmOpen) ||
+        !storyboardClearConfirmOpen &&
+        !storyboardCellClearConfirmCellId) ||
       typeof window === "undefined" ||
       typeof document === "undefined"
     ) {
@@ -3629,6 +4034,11 @@ function BananaStudioApp({ routeMode = "login" }) {
 
         if (storyboardClearConfirmOpen) {
           closeStoryboardClearConfirm();
+          return;
+        }
+
+        if (storyboardCellClearConfirmCellId) {
+          closeStoryboardCellClearConfirm();
           return;
         }
 
@@ -3687,7 +4097,13 @@ function BananaStudioApp({ routeMode = "login" }) {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", handleResize);
     };
-  }, [imagePreviewOpen, resourceManagerOpen, storyboardClearConfirmOpen, storyboardEditorOpen]);
+  }, [
+    imagePreviewOpen,
+    resourceManagerOpen,
+    storyboardCellClearConfirmCellId,
+    storyboardClearConfirmOpen,
+    storyboardEditorOpen,
+  ]);
 
   useEffect(() => {
     if (!imagePreviewOpen) {
@@ -3708,6 +4124,49 @@ function BananaStudioApp({ routeMode = "login" }) {
     imagePreviewPanRef.current = null;
     imagePreviewPinchRef.current = null;
   }, [imagePreviewOpen, previewRecord?.previewUrl]);
+
+  useEffect(() => {
+    if (
+      !storyboardEditorOpen ||
+      !storyboardEditorCellId ||
+      imagePreviewOpen ||
+      resourceManagerOpen ||
+      storyboardClearConfirmOpen ||
+      typeof window === "undefined"
+    ) {
+      return;
+    }
+
+    function handlePaste(event) {
+      const imageFiles = getImageFilesFromClipboardData(event.clipboardData);
+
+      if (imageFiles.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET) {
+        void appendStoryboardLocalImageFiles(imageFiles, "已粘贴剪贴板图片，仅作用于当前格子");
+        return;
+      }
+
+      void appendStoryboardReferenceFiles(imageFiles);
+    }
+
+    window.addEventListener("paste", handlePaste);
+
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+    };
+  }, [
+    imagePreviewOpen,
+    resourceManagerOpen,
+    storyboardClearConfirmOpen,
+    storyboardEditorCellId,
+    storyboardEditorMode,
+    storyboardEditorOpen,
+  ]);
 
   async function handleVerifySubmit(event) {
     event.preventDefault();
@@ -4012,10 +4471,43 @@ function BananaStudioApp({ routeMode = "login" }) {
         return;
       }
 
+      setStudioNotice(
+        nextFiles.some((file) => file.size > REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES)
+          ? "正在优化参考图，上传大图时会自动压缩到更稳定的体积..."
+          : "",
+      );
       const parsedImages = await Promise.all(nextFiles.map(readFileAsReferenceImage));
       setReferenceImages(parsedImages);
       setStudioError("");
+      setStudioNotice("");
     } catch (error) {
+      setStudioNotice("");
+      setStudioError(error instanceof Error ? error.message : "图片读取失败");
+    }
+  }
+
+  async function appendSimpleReferenceFiles(files) {
+    try {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      const nextFiles = imageFiles.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT);
+
+      if (nextFiles.length === 0) {
+        setStudioError("请上传 1 张图片作为简易模式参考图");
+        return;
+      }
+
+      setStudioNotice(
+        nextFiles.some((file) => file.size > REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES)
+          ? "正在优化参考图，上传大图时会自动压缩到更稳定的体积..."
+          : "",
+      );
+      const parsedImages = await Promise.all(nextFiles.map(readFileAsReferenceImage));
+      setSimpleReferenceImages(parsedImages);
+      setSimpleReferenceDisclosureOpen(true);
+      setStudioError("");
+      setStudioNotice("");
+    } catch (error) {
+      setStudioNotice("");
       setStudioError(error instanceof Error ? error.message : "图片读取失败");
     }
   }
@@ -4037,6 +4529,11 @@ function BananaStudioApp({ routeMode = "login" }) {
         return;
       }
 
+      setStudioNotice(
+        nextFiles.some((file) => file.size > REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES)
+          ? "正在优化参考图，上传大图时会自动压缩到更稳定的体积..."
+          : "",
+      );
       const parsedImages = await Promise.all(nextFiles.map(readFileAsReferenceImage));
       updateStoryboardCell(storyboardEditorCellId, (cell) => ({
         ...cell,
@@ -4044,7 +4541,9 @@ function BananaStudioApp({ routeMode = "login" }) {
         error: "",
       }));
       setStudioError("");
+      setStudioNotice("");
     } catch (error) {
+      setStudioNotice("");
       updateStoryboardCell(storyboardEditorCellId, (cell) => ({
         ...cell,
         error: error instanceof Error ? error.message : "参考图读取失败",
@@ -4061,6 +4560,20 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     try {
       await appendReferenceFiles(files);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function handleSimpleReferenceFileChange(event) {
+    const files = Array.from(event.target.files || []);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      await appendSimpleReferenceFiles(files);
     } finally {
       event.target.value = "";
     }
@@ -4110,8 +4623,26 @@ function BananaStudioApp({ routeMode = "login" }) {
     await appendReferenceFiles(files);
   }
 
+  async function handleSimpleReferenceUploadDrop(event) {
+    event.preventDefault();
+    setUploadDragActive(false);
+    const files = Array.from(event.dataTransfer?.files || []);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    await appendSimpleReferenceFiles(files);
+  }
+
   function handleRemoveReferenceImage(imageId) {
     setReferenceImages((currentValue) =>
+      currentValue.filter((image) => image.id !== imageId),
+    );
+  }
+
+  function handleRemoveSimpleReferenceImage(imageId) {
+    setSimpleReferenceImages((currentValue) =>
       currentValue.filter((image) => image.id !== imageId),
     );
   }
@@ -4641,6 +5172,33 @@ function BananaStudioApp({ routeMode = "login" }) {
     closeStoryboardEditor();
   }
 
+  function openStoryboardCellClearConfirm(cellId) {
+    const cell = storyboardCells[cellId];
+
+    if (!cell || cell.status === "loading" || !doesStoryboardCellHaveContent(cell)) {
+      return;
+    }
+
+    setStoryboardCellClearConfirmCellId(cellId);
+  }
+
+  function closeStoryboardCellClearConfirm() {
+    setStoryboardCellClearConfirmCellId("");
+  }
+
+  function handleConfirmClearStoryboardCell() {
+    const cellId = storyboardCellClearConfirmCellId;
+    const cell = cellId ? storyboardCells[cellId] : null;
+
+    if (!cell || cell.status === "loading") {
+      closeStoryboardCellClearConfirm();
+      return;
+    }
+
+    updateStoryboardCell(cellId, (currentCell) => createStoryboardCellState(currentCell));
+    closeStoryboardCellClearConfirm();
+  }
+
   function handleStoryboardPromptChange(value) {
     if (!storyboardEditorCellId) {
       return;
@@ -4665,10 +5223,11 @@ function BananaStudioApp({ routeMode = "login" }) {
     }));
   }
 
-  async function handleStoryboardLocalImageFileChange(event) {
-    const files = Array.from(event.target.files || []);
-
-    if (files.length === 0 || !storyboardEditorCellId) {
+  async function appendStoryboardLocalImageFiles(
+    files,
+    successText = "已导入本地图片，仅作用于当前格子",
+  ) {
+    if (!storyboardEditorCellId) {
       return;
     }
 
@@ -4697,7 +5256,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       updateStoryboardCell(storyboardEditorCellId, (cell) => ({
         ...cell,
         status: "success",
-        statusText: "已导入本地图片，仅作用于当前格子",
+        statusText: successText,
         error: "",
         record,
       }));
@@ -4708,6 +5267,18 @@ function BananaStudioApp({ routeMode = "login" }) {
         ...cell,
         error: error instanceof Error ? error.message : "本地图片读取失败",
       }));
+    }
+  }
+
+  async function handleStoryboardLocalImageFileChange(event) {
+    const files = Array.from(event.target.files || []);
+
+    if (files.length === 0 || !storyboardEditorCellId) {
+      return;
+    }
+
+    try {
+      await appendStoryboardLocalImageFiles(files);
     } finally {
       event.target.value = "";
     }
@@ -4928,6 +5499,7 @@ function BananaStudioApp({ routeMode = "login" }) {
             aspectRatio: generationAspectRatio,
             imageSize: generationImageSize,
             imageCount: generationImageCount,
+            referenceImages: buildProfessionalReferenceImages(simpleReferenceImages),
           })
         : buildProfessionalGenerationPayload({
             modelId: generationModelId,
@@ -5478,7 +6050,12 @@ function BananaStudioApp({ routeMode = "login" }) {
                       {generationResult.imageSize ? (
                         <span className="result-chip">
                           {generationResults.length > 1 ? `已生成 ${generationResults.length} 张独立图片 · ` : ""}
-                          {generationResult.imageSize} · {generationResult.aspectRatio}
+                          {generationResult.imageSize}
+                          {generationResult.aspectRatio
+                            ? ` · ${generationResult.aspectRatio}`
+                            : isSimplePanelMode
+                              ? " · 自动比例"
+                              : ""}
                         </span>
                       ) : null}
                       <div className="result-toolbar-actions">
@@ -5801,6 +6378,113 @@ function BananaStudioApp({ routeMode = "login" }) {
                 {isPromptFocusMode ? (
                   <div className="focus-mode-note">按 `Esc` 也可以退出专注输入。</div>
                 ) : null}
+
+                <div
+                  className={`storyboard-style-disclosure simple-reference-disclosure${simpleReferenceDisclosureOpen ? " is-open" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className={`storyboard-style-toggle${simpleReferenceDisclosureOpen ? " is-open" : ""}`}
+                    aria-expanded={simpleReferenceDisclosureOpen}
+                    aria-controls="simple-reference-controls"
+                    onClick={() =>
+                      setSimpleReferenceDisclosureOpen((currentValue) => !currentValue)
+                    }
+                  >
+                    <span>简易模式参考图</span>
+                    <span className="storyboard-style-toggle-meta">
+                      {simpleStyleReference ? `已上传：${simpleStyleReference.name}` : "未设置，可选"}
+                    </span>
+                    <span className="storyboard-style-toggle-icon" aria-hidden="true">
+                      ▾
+                    </span>
+                  </button>
+
+                  {simpleReferenceDisclosureOpen ? (
+                    <div className="storyboard-style-controls-shell">
+                      <div
+                        id="simple-reference-controls"
+                        className="simple-reference-panel"
+                        aria-label="简易模式参考图设置"
+                      >
+                        <p className="simple-reference-note">
+                          可选上传 1 张参考图。简易模式不会限制长宽比，交给模型自行判断更合适的画幅。
+                        </p>
+
+                        {simpleStyleReference ? (
+                          <div className="professional-style-reference-card">
+                            <div className="professional-style-reference-media">
+                              <img
+                                src={simpleStyleReference.previewUrl}
+                                alt={simpleStyleReference.name}
+                                draggable="false"
+                                loading="lazy"
+                                decoding="async"
+                              />
+                            </div>
+                            <div className="professional-style-reference-copy">
+                              <strong title={simpleStyleReference.name}>
+                                {simpleStyleReference.name}
+                              </strong>
+                              <span>这张图会作为简易模式的参考图，帮助模型理解主体和风格。</span>
+                              {getReferenceImageOptimizationSummary(simpleStyleReference) ? (
+                                <span>{getReferenceImageOptimizationSummary(simpleStyleReference)}</span>
+                              ) : null}
+                            </div>
+                            <div className="professional-style-reference-actions">
+                              <label
+                                className="ghost-button professional-style-reference-action"
+                                aria-label="更换简易模式参考图"
+                                title="上传新图"
+                              >
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                  <path d="M10 13V4.5" />
+                                  <path d="m6.8 7.7 3.2-3.2 3.2 3.2" />
+                                  <path d="M4.5 14.5v.6c0 .8.6 1.4 1.4 1.4h8.2c.8 0 1.4-.6 1.4-1.4v-.6" />
+                                </svg>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  onChange={handleSimpleReferenceFileChange}
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                className="ghost-button professional-style-reference-action professional-style-reference-action-danger"
+                                onClick={() => handleRemoveSimpleReferenceImage(simpleStyleReference.id)}
+                                aria-label="移除简易模式参考图"
+                                title="移除图片"
+                              >
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                  <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+                                  <path d="M4 6h12" />
+                                  <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+                                  <path d="M8 9v4.5" />
+                                  <path d="M12 9v4.5" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <label
+                            className={`upload-box professional-style-upload${uploadDragActive ? " is-drag-active" : ""}`}
+                            onDragOver={handleUploadDragOver}
+                            onDragLeave={handleUploadDragLeave}
+                            onDrop={handleSimpleReferenceUploadDrop}
+                          >
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={handleSimpleReferenceFileChange}
+                            />
+                            <span>上传简易模式参考图</span>
+                            <small>支持点击选择或拖入图片，最多 1 张。超大图片会自动压缩后上传。</small>
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </>
             ) : null}
 
@@ -5900,6 +6584,9 @@ function BananaStudioApp({ routeMode = "login" }) {
                               {professionalStyleReference.name}
                             </strong>
                             <span>这张图会自动附加到每个格子的生图请求里。</span>
+                            {getReferenceImageOptimizationSummary(professionalStyleReference) ? (
+                              <span>{getReferenceImageOptimizationSummary(professionalStyleReference)}</span>
+                            ) : null}
                           </div>
                           <div className="professional-style-reference-actions">
                             <label
@@ -5948,7 +6635,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                             onChange={handleFileChange}
                           />
                           <span>上传整体画风参考图</span>
-                          <small>支持点击选择或拖入图片，最多 1 张。</small>
+                          <small>支持点击选择或拖入图片，最多 1 张。超大图片会自动压缩后上传。</small>
                         </label>
                       )}
                     </div>
@@ -5995,7 +6682,9 @@ function BananaStudioApp({ routeMode = "login" }) {
                                 key={cell.id}
                                 cell={cell}
                                 dragDisabled={cell.status === "loading"}
+                                dragHandleOnly={isMobilePerformanceMode}
                                 onOpen={handleStoryboardCellOpen}
+                                onClear={openStoryboardCellClearConfirm}
                               />
                             ))}
                           </div>
@@ -6017,7 +6706,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                   </div>
 
                   <div
-                    className={`storyboard-style-disclosure${storyboardImageControlsCollapsed ? "" : " is-open"}`}
+                    className={`storyboard-style-disclosure professional-storyboard-disclosure${storyboardImageControlsCollapsed ? "" : " is-open"}`}
                   >
                     <button
                       type="button"
@@ -6153,7 +6842,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                   </div>
 
                   <div
-                    className={`storyboard-style-disclosure${storyboardStyleControlsCollapsed ? "" : " is-open"}`}
+                    className={`storyboard-style-disclosure professional-storyboard-disclosure${storyboardStyleControlsCollapsed ? "" : " is-open"}`}
                   >
                     <button
                       type="button"
@@ -6306,6 +6995,7 @@ function BananaStudioApp({ routeMode = "login" }) {
             ) : null}
 
             {studioError ? <p className="error-text">{studioError}</p> : null}
+            {studioNotice ? <p className="info-text">{studioNotice}</p> : null}
 
             {showSimplePanelSubmit ? (
               <>
@@ -6664,7 +7354,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                       <div className="storyboard-reference-panel-header">
                         <div className="section-title-inline">
                           <strong>当前格子的参考图</strong>
-                          <span>只影响这个格子，生成时会继续叠加整体画风参考图。</span>
+                          <span>只影响这个格子，生成时会继续叠加整体画风参考图。弹窗打开时支持 Ctrl/Command + V 粘贴剪贴板图片。</span>
                         </div>
                         {professionalStyleReference ? (
                           <span className="storyboard-reference-parent-hint">
@@ -6689,6 +7379,15 @@ function BananaStudioApp({ routeMode = "login" }) {
                               {storyboardEditorCell.referenceImages[0].name}
                             </strong>
                             <span>这张图会作为当前格子的额外参考，不会影响其它格子。</span>
+                            {getReferenceImageOptimizationSummary(
+                              storyboardEditorCell.referenceImages[0],
+                            ) ? (
+                              <span>
+                                {getReferenceImageOptimizationSummary(
+                                  storyboardEditorCell.referenceImages[0],
+                                )}
+                              </span>
+                            ) : null}
                           </div>
                           <div className="professional-style-reference-actions">
                             <label
@@ -6736,7 +7435,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                             onChange={handleStoryboardReferenceFileChange}
                           />
                           <span>上传当前格子的参考图</span>
-                          <small>支持 1 张图片，只作用于这个格子。</small>
+                          <small>支持 1 张图片，只作用于这个格子。超大图片会自动压缩后上传。</small>
                         </label>
                       )}
                     </div>
@@ -6745,8 +7444,41 @@ function BananaStudioApp({ routeMode = "login" }) {
                   <div className="storyboard-editor-asset-panel">
                     <div className="section-title-inline">
                       <strong>当前格子图片</strong>
-                      <span>可从本地上传，或从资源管理器选择一张图片放进当前格子。</span>
+                      <span>可从本地上传，或从资源管理器选择一张图片放进当前格子。弹窗打开时也支持 Ctrl/Command + V 粘贴剪贴板图片。</span>
                     </div>
+
+                    {storyboardEditorCell.record ? (
+                      <div className="storyboard-editor-selected-asset-card">
+                        <span className="storyboard-editor-selected-asset-media">
+                          <img
+                            src={storyboardEditorCell.record.previewUrl}
+                            alt={storyboardEditorCell.record.downloadName || `${storyboardEditorCell.label} 当前图片`}
+                            draggable="false"
+                            loading="lazy"
+                            decoding="async"
+                          />
+                        </span>
+                        <span className="storyboard-editor-selected-asset-copy">
+                          <strong
+                            title={
+                              storyboardEditorCell.record.downloadName ||
+                              `${storyboardEditorCell.label} 当前图片`
+                            }
+                          >
+                            {storyboardEditorCell.record.downloadName ||
+                              `${storyboardEditorCell.label} 当前图片`}
+                          </strong>
+                          <span>
+                            {storyboardEditorCell.record.imageSize === "本地导入"
+                              ? storyboardEditorCell.statusText || "已导入当前格子的本地图片"
+                              : storyboardEditorCell.statusText ===
+                                    "已复用资源管理器中的图片，仅作用于当前格子"
+                                ? storyboardEditorCell.statusText
+                                : "当前格子正在使用这张图片。"}
+                          </span>
+                        </span>
+                      </div>
+                    ) : null}
 
                     <label className="upload-box storyboard-editor-asset-upload">
                       <input
@@ -6839,7 +7571,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                     rows={2}
                     value={storyboardEditorCell.caption || ""}
                     onChange={(event) => handleStoryboardCaptionChange(event.target.value)}
-                    placeholder={"输入要显示在格子底部的文案\n例如：LV2.玩手机\n打游戏，原神启动！！！"}
+                    placeholder={"输入要显示在格子底部的文案\n例如：原神启动"}
                   />
                 </div>
                 {storyboardEditorCell.statusText ? (
@@ -6848,8 +7580,26 @@ function BananaStudioApp({ routeMode = "login" }) {
                 {storyboardEditorCell.error ? (
                   <p className="error-text">{storyboardEditorCell.error}</p>
                 ) : null}
-                {isStoryboardEditorGenerateMode ? (
-                  <div className="storyboard-editor-actions">
+                <div className="storyboard-editor-actions">
+                  <button
+                    type="button"
+                    className="ghost-button storyboard-clear-button"
+                    onClick={() => openStoryboardCellClearConfirm(storyboardEditorCell.id)}
+                    disabled={
+                      storyboardEditorCell.status === "loading" ||
+                      !doesStoryboardCellHaveContent(storyboardEditorCell)
+                    }
+                  >
+                    <svg viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="M5.5 6.5 6.2 16h7.6l.7-9.5" />
+                      <path d="M4 6h12" />
+                      <path d="M7.5 6V4.8c0-.4.4-.8.8-.8h3.4c.4 0 .8.4.8.8V6" />
+                      <path d="M8 9v4.5" />
+                      <path d="M12 9v4.5" />
+                    </svg>
+                    <span>清空当前格子</span>
+                  </button>
+                  {isStoryboardEditorGenerateMode ? (
                     <button
                       type="button"
                       className="primary-button"
@@ -6862,8 +7612,8 @@ function BananaStudioApp({ routeMode = "login" }) {
                           ? "重新生成图片"
                           : "生成图片"}
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
               </div>
 
               <div
@@ -6966,6 +7716,40 @@ function BananaStudioApp({ routeMode = "login" }) {
                 type="button"
                 className="primary-button storyboard-confirm-danger"
                 onClick={handleClearStoryboard}
+              >
+                确认清空
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {storyboardCellClearConfirmCell ? (
+        <div
+          className="storyboard-confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`确认清空${storyboardCellClearConfirmCell.label}`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeStoryboardCellClearConfirm();
+            }
+          }}
+        >
+          <section className="storyboard-confirm-panel">
+            <strong>确认清空 {storyboardCellClearConfirmCell.label}？</strong>
+            <p>这个操作会清掉当前格子的提示词、配文、参考图和已生成图片，刷新后也无法恢复。</p>
+            <div className="storyboard-confirm-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={closeStoryboardCellClearConfirm}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button storyboard-confirm-danger"
+                onClick={handleConfirmClearStoryboardCell}
               >
                 确认清空
               </button>

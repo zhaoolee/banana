@@ -52,6 +52,7 @@ const STANDARD_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
 const MAX_LAYOUT_TRACKS = 8;
 const MAX_IMAGE_COUNT = 4;
 const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+const MAX_VERTEX_INLINE_IMAGE_BYTES = 7 * 1024 * 1024;
 
 const BANANA_MODELS = [
   {
@@ -310,8 +311,8 @@ function sanitizeReferenceImages(input) {
 
     const estimatedBytes = Math.ceil((data.length * 3) / 4);
 
-    if (estimatedBytes > 8 * 1024 * 1024) {
-      throw new Error(`第 ${index + 1} 张参考图过大，请控制在 8MB 以内`);
+    if (estimatedBytes > MAX_VERTEX_INLINE_IMAGE_BYTES) {
+      throw new Error(`第 ${index + 1} 张参考图过大，请控制在 7MB 以内`);
     }
 
     return { mimeType, data, name };
@@ -340,6 +341,12 @@ function sanitizeLayoutGuideImage(input) {
     throw new Error("布局参考图内容无效");
   }
 
+  const estimatedBytes = Math.ceil((data.length * 3) / 4);
+
+  if (estimatedBytes > MAX_VERTEX_INLINE_IMAGE_BYTES) {
+    throw new Error("布局参考图过大，请控制在 7MB 以内");
+  }
+
   return { mimeType, data, name };
 }
 
@@ -357,12 +364,13 @@ function sanitizeGeneratePayload(input, mode = "professional") {
         layoutColumns: 1,
       },
       bananaModel,
+      { allowMissingAspectRatio: true },
     );
 
     return {
       prompt,
       bananaModel,
-      referenceImages: [],
+      referenceImages: sanitizeReferenceImages(input?.referenceImages),
       layoutGuideImage: null,
       imageOptions,
     };
@@ -904,7 +912,7 @@ async function saveGenerationArtifactsBatch({
   );
 }
 
-function sanitizeImageOptions(input, bananaModel) {
+function sanitizeImageOptions(input, bananaModel, { allowMissingAspectRatio = false } = {}) {
   const allowedAspectRatios = Array.isArray(bananaModel?.supportedAspectRatios) && bananaModel.supportedAspectRatios.length > 0
     ? bananaModel.supportedAspectRatios
     : STANDARD_ASPECT_RATIOS;
@@ -913,7 +921,9 @@ function sanitizeImageOptions(input, bananaModel) {
   const aspectRatio =
     typeof input?.aspectRatio === "string" && allowedAspectRatioSet.has(input.aspectRatio)
       ? input.aspectRatio
-      : fallbackAspectRatio;
+      : allowMissingAspectRatio
+        ? null
+        : fallbackAspectRatio;
 
   const layoutRows = Math.min(
     Math.max(Number.parseInt(String(input?.layoutRows || "1"), 10) || 1, 1),
@@ -987,7 +997,7 @@ function buildGeminiPrompt({
     bananaModel.promptBooster,
     referenceHint,
     layoutGuideHint,
-    `Preferred aspect ratio: ${imageOptions.aspectRatio}.`,
+    ...(imageOptions.aspectRatio ? [`Preferred aspect ratio: ${imageOptions.aspectRatio}.`] : []),
     `Preferred output resolution: ${imageOptions.imageSize}.`,
     `Requested output count: ${imageOptions.imageCount}.`,
     `Preferred layout grid: ${imageOptions.layoutRows} rows by ${imageOptions.layoutColumns} columns.`,
@@ -1145,7 +1155,7 @@ async function generateImageWithGemini({
     generationConfig: {
       responseModalities: ["TEXT", "IMAGE"],
       imageConfig: {
-        aspectRatio: imageOptions.aspectRatio,
+        ...(imageOptions.aspectRatio ? { aspectRatio: imageOptions.aspectRatio } : {}),
         ...(bananaModel.supportsImageSizeParam
           ? { imageSize: imageOptions.imageSize }
           : {}),

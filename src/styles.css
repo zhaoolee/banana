@@ -882,6 +882,61 @@ textarea:focus {
   padding-top: 0;
 }
 
+.simple-reference-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.simple-reference-disclosure {
+  margin-top: 6px;
+}
+
+.simple-reference-disclosure .storyboard-style-toggle {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 56px;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.simple-reference-disclosure .storyboard-style-toggle span:first-child {
+  font-size: 0.88rem;
+}
+
+.simple-reference-disclosure .storyboard-style-toggle-meta {
+  grid-column: auto;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.simple-reference-disclosure .storyboard-style-toggle-icon {
+  font-size: 0.84rem;
+}
+
+.professional-storyboard-disclosure .storyboard-style-toggle {
+  min-height: 56px;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.professional-storyboard-disclosure .storyboard-style-toggle span:first-child {
+  font-size: 0.88rem;
+}
+
+.professional-storyboard-disclosure .storyboard-style-toggle-meta {
+  font-size: 0.76rem;
+}
+
+.professional-storyboard-disclosure .storyboard-style-toggle-icon {
+  font-size: 0.84rem;
+}
+
+.simple-reference-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
 .storyboard-model-field {
   flex: 1 1 100%;
 }
@@ -1096,7 +1151,21 @@ textarea:focus {
 
 .storyboard-clear-button {
   flex: 0 0 auto;
+  margin-left: auto;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storyboard-clear-button svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .layout-preview-square {
@@ -1132,8 +1201,16 @@ textarea:focus {
   cursor: grabbing;
 }
 
+.storyboard-cell-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
 .storyboard-cell {
   position: relative;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
   border: 0;
   border-radius: 0;
@@ -1147,7 +1224,7 @@ textarea:focus {
   background: linear-gradient(180deg, rgba(246, 239, 225, 0.9), rgba(241, 233, 217, 0.94));
   color: var(--ink);
   cursor: grab;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
   transition:
     background 180ms ease,
@@ -1208,6 +1285,102 @@ textarea:focus {
 
 .storyboard-cell.has-image::after {
   opacity: 1;
+}
+
+.storyboard-cell.has-mobile-drag-handle {
+  padding-right: 42px;
+}
+
+.storyboard-cell-drag-handle {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 3;
+  width: 26px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.56);
+  border-radius: 999px;
+  background: rgba(66, 42, 16, 0.72);
+  color: rgba(255, 250, 244, 0.96);
+  box-shadow: 0 8px 20px rgba(50, 30, 8, 0.18);
+  transform: translateY(-50%);
+  touch-action: none;
+  transition:
+    background 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.storyboard-cell-drag-handle:hover:not(:disabled) {
+  background: rgba(86, 58, 25, 0.88);
+  transform: translateY(-50%) scale(1.03);
+}
+
+.storyboard-cell-drag-handle:disabled {
+  opacity: 0.56;
+  cursor: wait;
+}
+
+.storyboard-cell-drag-handle svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.storyboard-cell-clear-button {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  border-radius: 999px;
+  background: rgba(66, 42, 16, 0.72);
+  color: rgba(255, 250, 244, 0.96);
+  box-shadow: 0 8px 20px rgba(50, 30, 8, 0.22);
+  transition:
+    background 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.storyboard-cell.has-caption .storyboard-cell-clear-button {
+  bottom: calc(44px + (var(--storyboard-caption-font-scale, 1) - 1) * 20px);
+}
+
+.storyboard-cell.has-caption .storyboard-cell-drag-handle {
+  top: calc(50% - 12px);
+}
+
+.storyboard-cell-clear-button:hover:not(:disabled) {
+  background: rgba(139, 39, 20, 0.92);
+  transform: scale(1.04);
+}
+
+.storyboard-cell-clear-button:disabled {
+  opacity: 0.56;
+  cursor: wait;
+}
+
+.storyboard-cell-clear-button svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .storyboard-cell-index,
@@ -1560,6 +1733,51 @@ textarea:focus {
   background: rgba(255, 250, 237, 0.56);
 }
 
+.storyboard-editor-selected-asset-card {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid rgba(79, 54, 7, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 252, 0.84);
+}
+
+.storyboard-editor-selected-asset-media {
+  display: block;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(255, 250, 242, 0.96);
+}
+
+.storyboard-editor-selected-asset-media img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+}
+
+.storyboard-editor-selected-asset-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.storyboard-editor-selected-asset-copy strong {
+  overflow: hidden;
+  color: rgba(52, 35, 13, 0.94);
+  font-size: 0.88rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storyboard-editor-selected-asset-copy span {
+  color: rgba(117, 98, 70, 0.9);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
 .storyboard-reference-panel-header {
   display: flex;
   align-items: center;
@@ -1649,6 +1867,8 @@ textarea:focus {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .storyboard-editor-preview-card {
@@ -2438,6 +2658,11 @@ textarea {
 
 .error-text {
   color: #9f1e0f;
+  font-weight: 700;
+}
+
+.info-text {
+  color: rgba(117, 98, 70, 0.92);
   font-weight: 700;
 }
 
@@ -4072,6 +4297,28 @@ textarea {
   .storyboard-style-toggle-meta {
     grid-column: 1 / -1;
     white-space: normal;
+  }
+
+  .simple-reference-disclosure .storyboard-style-toggle {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    padding: 8px 12px;
+  }
+
+  .simple-reference-disclosure .storyboard-style-toggle-meta {
+    grid-column: auto;
+    white-space: nowrap;
+    text-align: right;
+  }
+
+  .professional-storyboard-disclosure .storyboard-style-toggle {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    padding: 8px 12px;
+  }
+
+  .professional-storyboard-disclosure .storyboard-style-toggle-meta {
+    grid-column: auto;
+    white-space: nowrap;
+    text-align: right;
   }
 
   .compact-range-field {

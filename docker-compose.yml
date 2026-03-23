@@ -8,6 +8,11 @@ services:
       - "23001:23001"
     env_file:
       - .env
+    environment:
+      GEMINI_AUTH_MODE: vertex-adc
+      GOOGLE_APPLICATION_CREDENTIALS: /app/.config/gcloud/application_default_credentials.json
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
     volumes:
       - ./storage:/app/storage
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/app/.config/gcloud/application_default_credentials.json:ro
     restart: unless-stopped
