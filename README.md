@@ -59,7 +59,7 @@ docker compose -f docker-compose.dev.yml up --build
 - 源码通过 volume 挂载到容器内，修改本地文件会直接生效
 - `.env` 会挂载进容器
 - 前端通过 `VITE_API_PROXY_TARGET=http://backend:23001` 代理到后端
-- 开发模式默认挂载宿主机 `${HOME}/.config/gcloud/application_default_credentials.json`
+- 开发模式默认只读挂载宿主机 `${HOME}/.config/gcloud`
 - 开发模式默认使用 `GEMINI_AUTH_MODE=vertex-adc`
 
 停止：
@@ -126,9 +126,9 @@ ls ${HOME}/.config/gcloud/application_default_credentials.json
 
 如果文件存在，开发和生产 compose 都会默认：
 
-- 挂载 `${HOME}/.config/gcloud/application_default_credentials.json`
+- 挂载 `${HOME}/.config/gcloud`
 - 设置 `GEMINI_AUTH_MODE=vertex-adc`
-- 设置 `GOOGLE_APPLICATION_CREDENTIALS=/app/.config/gcloud/application_default_credentials.json`
+- 设置 `GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json`
 - 默认使用 `GOOGLE_CLOUD_LOCATION=global`
 
 启动：
@@ -156,6 +156,7 @@ curl -sS http://127.0.0.1:23001/api/health
 - 如果 ADC 文件里带有 `quota_project_id`，并且后端能读到该文件，通常可以自动推断 `GOOGLE_CLOUD_PROJECT`
 - 如果你使用的不是 `gcloud auth application-default login` 生成的 ADC，而是其他 JSON 凭据，可能仍需要在 `.env` 里显式设置 `GOOGLE_CLOUD_PROJECT`
 - 开发和生产 compose 都保留 `${HOME}`，方便本地 macOS 和 Linux 服务器复用同一套启动方式
+- 容器内 ADC 固定读取 `/root/.config/gcloud/application_default_credentials.json`，不再依赖仓库内存在 `.config` 目录
 - 这套模式只影响“后端到 Google”的认证方式；前端访问你自己的后端仍然使用 `x-banana-pw`
 
 访问：
@@ -170,5 +171,5 @@ curl -sS http://127.0.0.1:23001/api/health
 - `./storage:/app/storage` 是持久化卷，保存 `pw-store.json`、日志和生成结果
 - 用户侧接口认证只走 `x-banana-pw`
 - 如果前面挂了 Nginx 或 Caddy，记得保留 `x-banana-pw` 请求头
-- 生产 compose 默认挂载宿主机 `${HOME}/.config/gcloud/application_default_credentials.json`
+- 生产 compose 默认只读挂载宿主机 `${HOME}/.config/gcloud`
 - 只要你的 ADC 文件里带有 `quota_project_id`，通常不需要再额外传 `GOOGLE_CLOUD_PROJECT`

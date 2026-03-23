@@ -456,11 +456,12 @@ function getGoogleAdcCandidatePaths() {
     getDefaultGoogleCloudSdkConfigDir(),
     "application_default_credentials.json",
   );
+  const legacyAppMountedAdcPath = "/app/.config/gcloud/application_default_credentials.json";
 
   return [...new Set([
     configuredPath,
-    "/app/.config/gcloud/application_default_credentials.json",
     defaultCloudSdkAdcPath,
+    legacyAppMountedAdcPath,
   ].filter(Boolean))];
 }
 

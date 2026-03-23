@@ -5,15 +5,18 @@ import { GoogleAuth } from "google-auth-library";
 
 const configuredCredentialsPath = String(process.env.GOOGLE_APPLICATION_CREDENTIALS || "").trim();
 const cloudSdkConfigDir = String(process.env.CLOUDSDK_CONFIG || "").trim() || path.join(os.homedir(), ".config", "gcloud");
+const defaultCloudSdkAdcPath = path.join(cloudSdkConfigDir, "application_default_credentials.json");
+const legacyAppMountedAdcPath = "/app/.config/gcloud/application_default_credentials.json";
 const candidateCredentialPaths = [
   configuredCredentialsPath,
-  "/app/.config/gcloud/application_default_credentials.json",
-  path.join(cloudSdkConfigDir, "application_default_credentials.json"),
+  defaultCloudSdkAdcPath,
+  legacyAppMountedAdcPath,
 ].filter(Boolean);
 const credentialsPath =
   candidateCredentialPaths.find((candidatePath) => fs.existsSync(candidatePath)) ||
   configuredCredentialsPath ||
-  "/app/.config/gcloud/application_default_credentials.json";
+  defaultCloudSdkAdcPath ||
+  legacyAppMountedAdcPath;
 let adcQuotaProjectId = "";
 
 if (credentialsPath && fs.existsSync(credentialsPath)) {
