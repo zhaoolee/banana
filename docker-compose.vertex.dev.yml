@@ -1,8 +1,0 @@
-services:
-  backend:
-    environment:
-      GEMINI_AUTH_MODE: vertex-adc
-      GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
-      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
-    volumes:
-      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro

@@ -39,10 +39,13 @@ PORT=23001
 
 ## Docker 开发
 
+默认开发入口只有一个：[`docker-compose.dev.yml`](./docker-compose.dev.yml)。
+该文件已经内置 Vertex ADC 配置，不再需要额外叠加 `docker-compose.vertex.dev.yml`。
+
 启动：
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
 访问：
@@ -59,6 +62,7 @@ docker compose -f docker-compose.dev.yml up --build
 - 源码通过 volume 挂载到容器内，修改本地文件会直接生效
 - `.env` 会挂载进容器
 - 前端通过 `VITE_API_PROXY_TARGET=http://backend:23001` 代理到后端
+- 开发环境默认就是 Vertex ADC，不再需要额外的 vertex overlay compose 文件
 - 开发模式默认只读挂载宿主机 `${HOME}/.config/gcloud`
 - 开发模式默认使用 `GEMINI_AUTH_MODE=vertex-adc`
 
@@ -104,13 +108,16 @@ npm run self-test
 - [Dockerfile](./Dockerfile)
 - [docker-compose.yml](./docker-compose.yml)
 
+默认生产入口只有一个：[`docker-compose.yml`](./docker-compose.yml)。
+该文件已经内置 Vertex ADC 配置，不再需要额外叠加 `docker-compose.vertex.yml`。
+
 启动：
 
 ```bash
 docker compose up -d --build
 ```
 
-### Vertex 启动方案
+### 默认 Vertex 配置
 
 适用场景：
 
@@ -157,6 +164,7 @@ curl -sS http://127.0.0.1:23001/api/health
 - 如果你使用的不是 `gcloud auth application-default login` 生成的 ADC，而是其他 JSON 凭据，可能仍需要在 `.env` 里显式设置 `GOOGLE_CLOUD_PROJECT`
 - 开发和生产 compose 都保留 `${HOME}`，方便本地 macOS 和 Linux 服务器复用同一套启动方式
 - 容器内 ADC 固定读取 `/root/.config/gcloud/application_default_credentials.json`，不再依赖仓库内存在 `.config` 目录
+- 仓库已移除 `docker-compose.vertex.yml` 和 `docker-compose.vertex.dev.yml`，避免与默认 compose 配置重复
 - 这套模式只影响“后端到 Google”的认证方式；前端访问你自己的后端仍然使用 `x-banana-pw`
 
 访问：
