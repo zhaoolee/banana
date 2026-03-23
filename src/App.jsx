@@ -18,6 +18,14 @@ import { CSS } from "@dnd-kit/utilities";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import localforage from "localforage";
 import AdminApp from "./AdminApp.jsx";
+import {
+  canRetryRequestTask,
+  getRequestTaskRetryHandler,
+  isRequestTaskTerminal,
+  normalizeRequestTaskProgress,
+  setRequestTaskRetryHandler,
+  useTaskStore,
+} from "./stores/taskStore.js";
 import { getProfessionalExportLayoutMetrics } from "../shared/professionalExportLayout.js";
 
 const LOGIN_PATH = "/login";
@@ -221,6 +229,10 @@ function createPersistedRecordId() {
   }
 
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createClientRequestId() {
+  return createPersistedRecordId();
 }
 
 function normalizeAspectRatioValue(value) {
@@ -468,11 +480,123 @@ function createStoryboardCellState(definition) {
     prompt: "",
     caption: "",
     referenceImages: [],
+    pendingRequestId: "",
     status: "idle",
     statusText: "",
     error: "",
     record: null,
   };
+}
+
+function findStoryboardCellIdByPendingRequestId(cells, requestId) {
+  const normalizedRequestId = normalizeTextValue(requestId);
+
+  if (!cells || typeof cells !== "object" || !normalizedRequestId) {
+    return "";
+  }
+
+  return (
+    Object.entries(cells).find(
+      ([, cell]) => normalizeTextValue(cell?.pendingRequestId) === normalizedRequestId,
+    )?.[0] || ""
+  );
+}
+
+function shouldPreserveRuntimeStoryboardCell(cell) {
+  return Boolean(
+    cell?.record ||
+      normalizeTextValue(cell?.pendingRequestId) ||
+      cell?.status === "loading" ||
+      normalizeTextValue(cell?.statusText) ||
+      normalizeTextValue(cell?.error),
+  );
+}
+
+function mergeHydratedStoryboardCells(persistedCells, currentCells, rows, columns) {
+  const normalizedPersistedCells = normalizeStoryboardCells(persistedCells, rows, columns);
+  const normalizedCurrentCells = normalizeStoryboardCells(currentCells, rows, columns);
+
+  return Object.fromEntries(
+    Object.keys(normalizedPersistedCells).map((cellId) => {
+      const persistedCell = normalizedPersistedCells[cellId];
+      const currentCell = normalizedCurrentCells[cellId];
+
+      if (!shouldPreserveRuntimeStoryboardCell(currentCell)) {
+        return [cellId, persistedCell];
+      }
+
+      return [
+        cellId,
+        {
+          ...persistedCell,
+          ...currentCell,
+          prompt: normalizeTextValue(currentCell?.prompt) || persistedCell.prompt,
+          caption: typeof currentCell?.caption === "string" && currentCell.caption
+            ? currentCell.caption
+            : persistedCell.caption,
+          pendingRequestId:
+            normalizeTextValue(currentCell?.pendingRequestId) || persistedCell.pendingRequestId,
+          referenceImages:
+            Array.isArray(currentCell?.referenceImages) && currentCell.referenceImages.length > 0
+              ? currentCell.referenceImages
+              : persistedCell.referenceImages,
+          record: currentCell?.record || persistedCell.record,
+        },
+      ];
+    }),
+  );
+}
+
+function buildStoryboardCellTaskPatch(task, currentCell) {
+  if (!task) {
+    return null;
+  }
+
+  if (
+    task.status === "queued" ||
+    task.status === "accepted" ||
+    task.status === "processing" ||
+    task.status === "saving"
+  ) {
+    return {
+      status: "loading",
+      statusText: task.message || "banana 正在生图...",
+      error: "",
+      pendingRequestId:
+        normalizeTextValue(currentCell?.pendingRequestId) || normalizeTextValue(task?.requestId),
+    };
+  }
+
+  if (task.status === "failed") {
+    return {
+      status: currentCell?.record ? "success" : "idle",
+      statusText: "",
+      error: task.error || task.message || "banana 生图失败",
+      pendingRequestId: "",
+    };
+  }
+
+  if (task.status === "recovered" || task.status === "succeeded") {
+    if (currentCell?.record) {
+      return {
+        status: "success",
+        statusText:
+          currentCell.statusText || task.message || "已恢复上一次请求的图片结果",
+        error: "",
+        pendingRequestId: "",
+      };
+    }
+
+    return {
+      status: "loading",
+      statusText: task.message || "banana 已完成任务，正在恢复图片...",
+      error: "",
+      pendingRequestId:
+        normalizeTextValue(currentCell?.pendingRequestId) || normalizeTextValue(task?.requestId),
+    };
+  }
+
+  return null;
 }
 
 function doesStoryboardCellHaveContent(cell) {
@@ -495,6 +619,7 @@ function buildStoryboardCellContentSnapshot(cell) {
       cell?.status === "loading" || cell?.status === "success" ? cell.status : "idle",
     statusText: typeof cell?.statusText === "string" ? cell.statusText : "",
     error: typeof cell?.error === "string" ? cell.error : "",
+    pendingRequestId: normalizeTextValue(cell?.pendingRequestId),
     record: cell?.record || null,
   };
 }
@@ -541,6 +666,7 @@ function normalizeStoryboardCells(currentCells, rows, columns) {
               ...currentCell,
               ...definition,
               caption: typeof currentCell?.caption === "string" ? currentCell.caption : "",
+              pendingRequestId: normalizeTextValue(currentCell?.pendingRequestId),
               referenceImages: Array.isArray(currentCell?.referenceImages)
                 ? currentCell.referenceImages
                     .map(restorePersistedReferenceImage)
@@ -1228,6 +1354,107 @@ function formatPersistedAt(value) {
   }).format(date);
 }
 
+function getRequestTaskTypeLabel(task) {
+  if (task?.type === "enhance" || task?.mode === "enhance") {
+    return "提升";
+  }
+
+  if (task?.type === "storyboard") {
+    return "分镜生图";
+  }
+
+  if (task?.mode === "simple") {
+    return "简易生图";
+  }
+
+  return "专业生图";
+}
+
+function getRequestTaskStatusLabel(task) {
+  if (task?.status === "failed" && task?.stage === "stale") {
+    return "已中断";
+  }
+
+  switch (task?.status) {
+    case "queued":
+      return "排队中";
+    case "processing":
+      return "处理中";
+    case "saving":
+      return "保存中";
+    case "succeeded":
+      return "已完成";
+    case "recovered":
+      return "已恢复";
+    case "failed":
+      return "失败";
+    case "accepted":
+    default:
+      return "已接收";
+  }
+}
+
+function buildRequestTaskMeta(task) {
+  const parts = [
+    getRequestTaskTypeLabel(task),
+    task?.requestId ? `ID ${task.requestId.slice(0, 8)}` : "",
+    formatPersistedAt(task?.updatedAt || task?.createdAt),
+  ].filter(Boolean);
+
+  return parts.join(" · ");
+}
+
+function buildRequestTaskQueueSummary(task) {
+  if (task?.queueRateLimitWaitMs > 0) {
+    const seconds = Math.ceil(task.queueRateLimitWaitMs / 1000);
+    return task.queuePosition > 0
+      ? `Google 限流冷却中，前方还有 ${Math.max(task.queuePosition - 1, 0)} 个任务，预计至少 ${seconds} 秒`
+      : `Google 限流冷却中，预计至少 ${seconds} 秒`;
+  }
+
+  if (task?.queuePosition > 1) {
+    return `队列前方还有 ${task.queuePosition - 1} 个任务`;
+  }
+
+  if (!isRequestTaskTerminal(task) && task?.queueConcurrency > 0) {
+    return `后端并发 ${task.queueActiveCount}/${task.queueConcurrency}`;
+  }
+
+  return "";
+}
+
+function parseRequestTaskTimeMs(value) {
+  const timeMs = Date.parse(typeof value === "string" ? value : "");
+  return Number.isFinite(timeMs) ? timeMs : 0;
+}
+
+function isOrphanedPendingRequestTask(task, backendStartedAt) {
+  if (isRequestTaskTerminal(task)) {
+    return false;
+  }
+
+  const taskCreatedAtMs = parseRequestTaskTimeMs(task?.createdAt);
+  const backendStartedAtMs = parseRequestTaskTimeMs(backendStartedAt);
+
+  return taskCreatedAtMs > 0 && backendStartedAtMs > taskCreatedAtMs;
+}
+
+function buildOrphanedRequestTaskPatch(task) {
+  return {
+    status: "failed",
+    stage: "stale",
+    message: "后端已重启，旧任务未继续执行，请重试",
+    error: "后端已重启，旧任务未继续执行，请重试",
+    canRetry: task?.canRetry !== false,
+    queuePosition: 0,
+    queueActiveCount: 0,
+    queuePendingCount: 0,
+    queueConcurrency: 0,
+    queueRateLimitWaitMs: 0,
+    queueRateLimitedUntil: "",
+  };
+}
+
 function buildGalleryDateKey(value) {
   const date = new Date(value);
 
@@ -1641,6 +1868,7 @@ function buildPwHeaders(password) {
 async function fetchBananaModels(password) {
   const response = await fetch("/api/models", {
     headers: buildPwHeaders(password),
+    cache: "no-store",
   });
 
   return parseJsonResponse(response);
@@ -1649,9 +1877,72 @@ async function fetchBananaModels(password) {
 async function verifyPassword(password) {
   const response = await fetch("/api/access/session", {
     headers: buildPwHeaders(password),
+    cache: "no-store",
   });
 
   return parseJsonResponse(response);
+}
+
+async function fetchRecoverableGenerationRequest(password, requestId) {
+  const response = await fetch(`/api/generations/${encodeURIComponent(requestId)}`, {
+    headers: buildPwHeaders(password),
+    cache: "no-store",
+  });
+
+  return parseJsonResponse(response);
+}
+
+async function fetchRetryableGenerationRequest(password, requestId) {
+  const response = await fetch(`/api/generations/${encodeURIComponent(requestId)}/retry`, {
+    method: "POST",
+    headers: buildPwHeaders(password),
+  });
+
+  return parseJsonResponse(response);
+}
+
+function createSseBufferDrainer(handleSseEvent) {
+  return function drainSseBuffer(currentBuffer, flush = false) {
+    let nextBuffer = currentBuffer;
+
+    while (nextBuffer.includes("\n\n")) {
+      const boundaryIndex = nextBuffer.indexOf("\n\n");
+      const rawEvent = nextBuffer.slice(0, boundaryIndex);
+      nextBuffer = nextBuffer.slice(boundaryIndex + 2);
+
+      const eventMatch = rawEvent.match(/^event:\s*(.+)$/m);
+      const eventName = eventMatch?.[1]?.trim() || "message";
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length === 0) {
+        continue;
+      }
+
+      handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
+    }
+
+    if (flush && nextBuffer.trim()) {
+      const eventMatch = nextBuffer.match(/^event:\s*(.+)$/m);
+      const eventName = eventMatch?.[1]?.trim() || "message";
+      const dataLines = nextBuffer
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+
+      if (dataLines.length > 0) {
+        handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
+      }
+
+      nextBuffer = "";
+    }
+
+    return {
+      buffer: nextBuffer,
+    };
+  };
 }
 
 async function requestSseJsonStream(password, endpoint, payload, handlers = {}) {
@@ -1702,57 +1993,14 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
     return null;
   }
 
-  function drainSseBuffer(currentBuffer, flush = false) {
-    let nextBuffer = currentBuffer;
-    let nextFinalResult = null;
+  let finalResultFromEvents = null;
+  const drainSseBuffer = createSseBufferDrainer((eventName, data) => {
+    const eventResult = handleSseEvent(eventName, data);
 
-    while (nextBuffer.includes("\n\n")) {
-      const boundaryIndex = nextBuffer.indexOf("\n\n");
-      const rawEvent = nextBuffer.slice(0, boundaryIndex);
-      nextBuffer = nextBuffer.slice(boundaryIndex + 2);
-
-      const eventMatch = rawEvent.match(/^event:\s*(.+)$/m);
-      const eventName = eventMatch?.[1]?.trim() || "message";
-      const dataLines = rawEvent
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim());
-
-      if (dataLines.length === 0) {
-        continue;
-      }
-
-      const eventResult = handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
-
-      if (eventResult) {
-        nextFinalResult = eventResult;
-      }
+    if (eventResult) {
+      finalResultFromEvents = eventResult;
     }
-
-    if (flush && nextBuffer.trim()) {
-      const eventMatch = nextBuffer.match(/^event:\s*(.+)$/m);
-      const eventName = eventMatch?.[1]?.trim() || "message";
-      const dataLines = nextBuffer
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim());
-
-      if (dataLines.length > 0) {
-        const eventResult = handleSseEvent(eventName, JSON.parse(dataLines.join("\n")));
-
-        if (eventResult) {
-          nextFinalResult = eventResult;
-        }
-      }
-
-      nextBuffer = "";
-    }
-
-    return {
-      buffer: nextBuffer,
-      finalResult: nextFinalResult,
-    };
-  }
+  });
 
   armStreamTimeout();
 
@@ -1784,7 +2032,7 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
         if (done) {
           const drained = drainSseBuffer(buffer, true);
           buffer = drained.buffer;
-          finalResult = drained.finalResult || finalResult;
+          finalResult = finalResultFromEvents || finalResult;
           break;
         }
 
@@ -1793,7 +2041,7 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
 
         const drained = drainSseBuffer(buffer);
         buffer = drained.buffer;
-        finalResult = drained.finalResult || finalResult;
+        finalResult = finalResultFromEvents || finalResult;
       }
     } finally {
       clearStreamTimeout();
@@ -1816,6 +2064,98 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
 
     throw error;
   }
+}
+
+function subscribeTaskStatusStream(password, requestIds, handlers = {}) {
+  const abortController = new AbortController();
+  let timeoutId = 0;
+  let closed = false;
+
+  function clearTimeoutId() {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+      timeoutId = 0;
+    }
+  }
+
+  function armTimeout() {
+    clearTimeoutId();
+    timeoutId = window.setTimeout(() => {
+      abortController.abort(new Error("任务状态连接超时，请稍后重试。"));
+    }, SSE_INACTIVITY_TIMEOUT_MS);
+  }
+
+  function close() {
+    if (closed) {
+      return;
+    }
+
+    closed = true;
+    clearTimeoutId();
+    abortController.abort();
+  }
+
+  const drainSseBuffer = createSseBufferDrainer((eventName, data) => {
+    armTimeout();
+
+    if (eventName === "status") {
+      handlers.onStatus?.(data);
+      return;
+    }
+
+    if (eventName === "error") {
+      throw new Error(data?.error || "任务状态订阅失败");
+    }
+  });
+
+  armTimeout();
+
+  const ready = (async () => {
+    const response = await fetch("/api/tasks/watch/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...buildPwHeaders(password),
+      },
+      body: JSON.stringify({ requestIds }),
+      signal: abortController.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      clearTimeoutId();
+      return parseJsonResponse(response);
+    }
+
+    const decoder = new TextDecoder();
+    const reader = response.body.getReader();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+
+        if (done) {
+          drainSseBuffer(buffer, true);
+          break;
+        }
+
+        armTimeout();
+        buffer += decoder.decode(value, { stream: true });
+        const drained = drainSseBuffer(buffer);
+        buffer = drained.buffer;
+      }
+    } finally {
+      clearTimeoutId();
+      reader.releaseLock();
+    }
+
+    return null;
+  })();
+
+  return {
+    close,
+    ready,
+  };
 }
 
 async function requestSimpleGeneration(password, payload, handlers) {
@@ -2236,6 +2576,7 @@ function buildPersistedStoryboardCells(cells) {
       {
         prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
         caption: typeof cell?.caption === "string" ? cell.caption : "",
+        pendingRequestId: normalizeTextValue(cell?.pendingRequestId),
         referenceImages: Array.isArray(cell?.referenceImages)
           ? cell.referenceImages
               .map(buildPersistedReferenceImage)
@@ -2428,6 +2769,7 @@ function restorePersistedStoryboardCells(cells) {
           id: cellId,
           prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
           caption: typeof cell?.caption === "string" ? cell.caption : "",
+          pendingRequestId: normalizeTextValue(cell?.pendingRequestId),
           referenceImages: Array.isArray(cell?.referenceImages)
             ? cell.referenceImages
                 .map(restorePersistedReferenceImage)
@@ -2763,6 +3105,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [backendBusyStartedAt, setBackendBusyStartedAt] = useState(0);
   const [backendBusyTickAt, setBackendBusyTickAt] = useState(0);
   const [backendBusyStreamText, setBackendBusyStreamText] = useState("");
+  const [taskRecoveryPauseCount, setTaskRecoveryPauseCount] = useState(0);
   const [generationResult, setGenerationResult] = useState(null);
   const [generationResults, setGenerationResults] = useState([]);
   const [generationLibrary, setGenerationLibrary] = useState([]);
@@ -2849,6 +3192,15 @@ function BananaStudioApp({ routeMode = "login" }) {
   );
   const [professionalExportScale, setProfessionalExportScale] = useState(1);
   const [professionalExportCardElement, setProfessionalExportCardElement] = useState(null);
+  const requestTasks = useTaskStore((state) => state.requestTasks);
+  const retryingRequestTaskIds = useTaskStore((state) => state.retryingRequestTaskIds);
+  const taskManagerOpen = useTaskStore((state) => state.taskManagerOpen);
+  const setTaskManagerOpen = useTaskStore((state) => state.setTaskManagerOpen);
+  const upsertRequestTask = useTaskStore((state) => state.upsertRequestTask);
+  const updateRequestTask = useTaskStore((state) => state.updateRequestTask);
+  const startRetryingRequestTask = useTaskStore((state) => state.startRetryingRequestTask);
+  const finishRetryingRequestTask = useTaskStore((state) => state.finishRetryingRequestTask);
+  const clearTerminalRequestTasks = useTaskStore((state) => state.clearTerminalRequestTasks);
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const storyboardCaptionTextareaRef = useRef(null);
@@ -2859,6 +3211,12 @@ function BananaStudioApp({ routeMode = "login" }) {
   const storyboardShareCopyResetTimeoutRef = useRef(null);
   const storyboardLibraryPickerTimeoutRef = useRef(null);
   const generationLibraryLoadPromiseRef = useRef(null);
+  const taskRecoveryInFlightRequestIdsRef = useRef(new Set());
+  const taskStatusStreamHandleRef = useRef(null);
+  const taskStatusStreamReconnectTimeoutRef = useRef(0);
+  const taskStatusStreamRequestIdsRef = useRef([]);
+  const taskStatusStreamPasswordRef = useRef("");
+  const taskStatusStreamGenerationRef = useRef(0);
   const professionalSceneImportInputRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
@@ -3050,6 +3408,30 @@ function BananaStudioApp({ routeMode = "login" }) {
     backendBusyEstimateMs > 0
       ? Math.min(backendBusyElapsedMs / backendBusyEstimateMs, 1)
       : 0;
+  const recoverableRequestTasks = useMemo(
+    () =>
+      requestTasks
+        .filter((task) => !isRequestTaskTerminal(task))
+        .sort((leftTask, rightTask) => {
+          const leftTime = Date.parse(leftTask.createdAt || "") || 0;
+          const rightTime = Date.parse(rightTask.createdAt || "") || 0;
+          return leftTime - rightTime;
+        }),
+    [requestTasks],
+  );
+  const activeRequestTaskCount = recoverableRequestTasks.length;
+  const recoverableRequestTaskSignature = useMemo(
+    () => recoverableRequestTasks.map((task) => task.requestId).join("|"),
+    [recoverableRequestTasks],
+  );
+  const sortedRequestTasks = useMemo(
+    () => requestTasks,
+    [requestTasks],
+  );
+  const clearableRequestTaskCount = useMemo(
+    () => requestTasks.filter((task) => isRequestTaskTerminal(task)).length,
+    [requestTasks],
+  );
   const finderFilters = useMemo(() => {
     return getFinderFilterDefinitions(generationLibrary);
   }, [generationLibrary]);
@@ -3128,6 +3510,311 @@ function BananaStudioApp({ routeMode = "login" }) {
     };
   }
 
+  function beginTaskRecoveryPause() {
+    let released = false;
+    setTaskRecoveryPauseCount((currentValue) => currentValue + 1);
+
+    return () => {
+      if (released) {
+        return;
+      }
+
+      released = true;
+      setTaskRecoveryPauseCount((currentValue) => Math.max(0, currentValue - 1));
+    };
+  }
+
+  async function executeRetryPayloadTask(task, retryPayload) {
+    const resolvedStoryboardCellId =
+      normalizeTextValue(task?.storyboardCellId) ||
+      findStoryboardCellIdByPendingRequestId(storyboardCells, task?.requestId);
+    const resolvedStoryboardCell =
+      resolvedStoryboardCellId && storyboardCells[resolvedStoryboardCellId]
+        ? storyboardCells[resolvedStoryboardCellId]
+        : null;
+    const retryType =
+      resolvedStoryboardCell
+        ? "storyboard"
+        : normalizeTextValue(task?.type) === "storyboard"
+        ? "storyboard"
+        : normalizeTextValue(retryPayload?.type) || normalizeTextValue(task?.type);
+    const retryMode = normalizeTextValue(retryPayload?.mode) || normalizeTextValue(task?.mode);
+    const retryImageOptions = retryPayload?.imageOptions || {};
+
+    if (retryType === "enhance") {
+      await executeEnhancementTask({
+        sourceGenerationRecord: {
+          bananaModelId: retryPayload?.modelId || "",
+          mimeType: retryPayload?.sourceImage?.mimeType || "image/png",
+          imageBase64: retryPayload?.sourceImage?.data || "",
+          aspectRatio: retryImageOptions?.aspectRatio || "",
+          layoutRows: retryImageOptions?.layoutRows || 1,
+          layoutColumns: retryImageOptions?.layoutColumns || 1,
+          savedRecord: null,
+        },
+        promptSnapshot: retryPayload?.prompt || task?.promptSnapshot || "",
+        targetImageSize: retryImageOptions?.imageSize || enhancementTargetImageSize,
+      });
+      return;
+    }
+
+    if (retryType === "storyboard") {
+      if (resolvedStoryboardCell) {
+        await executeStoryboardCellTask({
+          editorCell: resolvedStoryboardCell,
+          modelId: retryPayload?.modelId || generationModelId,
+          requestedPromptValue: retryPayload?.prompt || task?.promptSnapshot || "",
+          storyboardAspectRatio: retryImageOptions?.aspectRatio || professionalStoryboardAspectRatioValue,
+          storyboardImageSize: retryImageOptions?.imageSize || professionalStoryboardImageSizeValue,
+          globalReferenceImageRecords: retryPayload?.referenceImages || [],
+        });
+        return;
+      }
+    }
+
+    await executeGenerationTask({
+      mode: retryMode === "simple" ? "simple" : "professional",
+      modelId: retryPayload?.modelId || generationModelId,
+      prompt: retryPayload?.prompt || task?.promptSnapshot || "",
+      aspectRatio:
+        retryImageOptions?.aspectRatio ||
+        (retryMode === "simple" ? generationAspectRatio : professionalDefaultCellAspectRatio),
+      imageSize: retryImageOptions?.imageSize || generationImageSize,
+      imageCount: retryImageOptions?.imageCount || 1,
+      layoutRows: retryImageOptions?.layoutRows || 1,
+      layoutColumns: retryImageOptions?.layoutColumns || 1,
+      referenceImageRecords: retryPayload?.referenceImages || [],
+    });
+  }
+
+  async function handleRetryRequestTask(task) {
+    const requestId = normalizeTextValue(task?.requestId);
+    const retryHandler = getRequestTaskRetryHandler(requestId);
+
+    if (!requestId || retryingRequestTaskIds[requestId]) {
+      return;
+    }
+
+    startRetryingRequestTask(requestId);
+
+    try {
+      setStudioError("");
+      setStudioNotice("已重新提交失败任务，请查看新的任务状态。");
+
+      if (activePw) {
+        const data = await fetchRetryableGenerationRequest(activePw, requestId);
+
+        if (data?.retryPayload) {
+          await executeRetryPayloadTask(task, data.retryPayload);
+          updateRequestTask(requestId, {
+            canRetry: true,
+            message: "已重新提交新的重试任务",
+          });
+          return;
+        }
+      }
+
+      if (typeof retryHandler === "function") {
+        await retryHandler();
+      } else {
+        throw new Error("当前任务没有可重试的请求体，请重新发起一次请求");
+      }
+
+      updateRequestTask(requestId, {
+        message: "已重新提交新的重试任务",
+      });
+    } catch (error) {
+      if (error?.status === 400 && typeof retryHandler !== "function") {
+        updateRequestTask(requestId, {
+          canRetry: false,
+        });
+      }
+      setStudioError(error instanceof Error ? error.message : "任务重试失败");
+    } finally {
+      finishRetryingRequestTask(requestId);
+    }
+  }
+
+  async function recoverRequestTaskFromServer(requestTask) {
+    if (!activePw || !requestTask?.requestId) {
+      return { state: "idle" };
+    }
+
+    try {
+      const data = await fetchRecoverableGenerationRequest(activePw, requestTask.requestId);
+      const nextRemainingCredits = normalizeRemainingCredits(
+        data?.result?.quota?.remainingCredits ?? data?.quota?.remainingCredits,
+      );
+
+      if (nextRemainingCredits !== null) {
+        setRemainingQuota(nextRemainingCredits);
+      }
+
+      if (isOrphanedPendingRequestTask(requestTask, data?.backendStartedAt)) {
+        updateRequestTask(requestTask.requestId, buildOrphanedRequestTaskPatch(requestTask));
+        return {
+          state: "failed",
+          data,
+        };
+      }
+
+      if (data?.status === "succeeded" && data?.result) {
+        const nextResults = buildGeneratedImageRecords(data.result, {
+          promptSnapshot: requestTask.promptSnapshot,
+        });
+        const storyboardCellId =
+          normalizeTextValue(requestTask?.storyboardCellId) ||
+          findStoryboardCellIdByPendingRequestId(storyboardCells, requestTask?.requestId);
+        const recoveredStoryboardResult =
+          storyboardCellId
+            ? buildGeneratedImageRecord(data.result, {
+                promptSnapshot: requestTask.promptSnapshot,
+                storyboardCellId,
+                storyboardCellLabel: requestTask?.storyboardCellLabel || "",
+                storyboardCellCoordinate: requestTask?.storyboardCellCoordinate || "",
+              })
+            : null;
+
+        if (nextResults.length === 0) {
+          throw new Error("banana 已完成任务，但恢复结果失败");
+        }
+
+        if (storyboardCellId && recoveredStoryboardResult) {
+          updateStoryboardCell(storyboardCellId, (cell) => ({
+            ...cell,
+            status: "success",
+            statusText: "已恢复上一次请求的图片结果",
+            error: "",
+            pendingRequestId: "",
+            record: recoveredStoryboardResult,
+          }));
+        }
+
+        setCurrentGenerationSelection(nextResults, nextResults[0]);
+        setStudioError("");
+        setStudioNotice("已恢复上一次请求的图片结果");
+        updateRequestTask(requestTask.requestId, {
+          status: "recovered",
+          stage: "result",
+          message: data?.message || "已恢复上一次请求的图片结果",
+          error: "",
+          canRetry: data?.canRetry !== false,
+          queuePosition: 0,
+          queueRateLimitWaitMs: 0,
+        });
+
+        try {
+          await persistGeneratedRecords(nextResults, nextResults[0].id);
+        } catch (error) {
+          console.warn("Persist recovered generation result failed:", error);
+          setStudioError("图片已恢复，但写入本地资源管理器失败");
+        }
+
+        return {
+          state: "recovered",
+          data,
+        };
+      }
+
+      if (data?.status === "failed") {
+        const storyboardCellId =
+          normalizeTextValue(requestTask?.storyboardCellId) ||
+          findStoryboardCellIdByPendingRequestId(storyboardCells, requestTask?.requestId);
+
+        if (storyboardCellId) {
+          updateStoryboardCell(storyboardCellId, (cell) => ({
+            ...cell,
+            status: cell?.record ? "success" : "idle",
+            statusText: "",
+            error: data?.error || data?.message || "banana 任务失败",
+            pendingRequestId: "",
+          }));
+        }
+
+        setStudioNotice("");
+        setStudioError(data?.error || data?.message || "banana 任务失败");
+        updateRequestTask(requestTask.requestId, {
+          status: "failed",
+          stage: data?.stage || "error",
+          message: data?.message || "banana 任务失败",
+          error: data?.error || data?.message || "banana 任务失败",
+          canRetry: data?.canRetry !== false,
+          queuePosition: data?.queuePosition || 0,
+          queueActiveCount: data?.queueActiveCount || 0,
+          queuePendingCount: data?.queuePendingCount || 0,
+          queueConcurrency: data?.queueConcurrency || 0,
+          queueRateLimitWaitMs: data?.queueRateLimitWaitMs || 0,
+          queueRateLimitedUntil: data?.queueRateLimitedUntil || "",
+        });
+        return {
+          state: "failed",
+          data,
+        };
+      }
+
+      updateRequestTask(requestTask.requestId, {
+        status: normalizeRequestTaskProgress(data)?.status || "processing",
+        stage: data?.stage || "accepted",
+        message:
+          data?.message || "网络中断后任务仍在后端处理中，恢复联网后会自动取回结果。",
+        error: data?.error || "",
+        canRetry: data?.canRetry !== false,
+        queuePosition: data?.queuePosition || 0,
+        queueActiveCount: data?.queueActiveCount || 0,
+        queuePendingCount: data?.queuePendingCount || 0,
+        queueConcurrency: data?.queueConcurrency || 0,
+        queueRateLimitWaitMs: data?.queueRateLimitWaitMs || 0,
+        queueRateLimitedUntil: data?.queueRateLimitedUntil || "",
+      });
+      setStudioNotice(
+        data?.message || "网络中断后任务仍在后端处理中，恢复联网后会自动取回结果。",
+      );
+
+      return {
+        state: "pending",
+        data,
+      };
+    } catch (error) {
+      if (error?.status === 404) {
+        const createdAtMs = Date.parse(requestTask?.createdAt || "");
+        const isFreshRequest =
+          Number.isFinite(createdAtMs) && Date.now() - createdAtMs < 60 * 1000;
+
+        if (isFreshRequest) {
+          setStudioNotice("正在尝试恢复上一次请求结果...");
+          updateRequestTask(requestTask.requestId, {
+            status: "queued",
+            stage: "queued",
+            message: "正在尝试恢复上一次请求结果...",
+          });
+          return {
+            state: "pending",
+            error,
+          };
+        }
+
+        setStudioNotice("");
+        setStudioError("未找到待恢复的请求记录，请重新生成");
+        updateRequestTask(requestTask.requestId, {
+          status: "failed",
+          stage: "error",
+          message: "未找到待恢复的请求记录，请重新生成",
+          error: "未找到待恢复的请求记录，请重新生成",
+        });
+        return {
+          state: "missing",
+          error,
+        };
+      }
+
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        setStudioNotice("网络已断开，恢复联网后会自动取回上一次生成结果。");
+      }
+
+      throw error;
+    }
+  }
+
   async function ensureGenerationLibraryLoaded() {
     if (generationLibraryLoaded) {
       return generationLibrary;
@@ -3178,9 +3865,10 @@ function BananaStudioApp({ routeMode = "login" }) {
         setSimpleReferenceImages(
           persistedSimpleReferenceImages.slice(0, PROFESSIONAL_STYLE_REFERENCE_LIMIT),
         );
-        setStoryboardCells(
-          normalizeStoryboardCells(
+        setStoryboardCells((currentValue) =>
+          mergeHydratedStoryboardCells(
             persistedStoryboardCells,
+            currentValue,
             professionalLayoutRows,
             professionalLayoutColumns,
           ),
@@ -3361,6 +4049,163 @@ function BananaStudioApp({ routeMode = "login" }) {
       cancelled = true;
     };
   }, [activePw, sessionState]);
+
+  function closeTaskStatusStream() {
+    if (taskStatusStreamReconnectTimeoutRef.current) {
+      window.clearTimeout(taskStatusStreamReconnectTimeoutRef.current);
+      taskStatusStreamReconnectTimeoutRef.current = 0;
+    }
+
+    taskStatusStreamGenerationRef.current += 1;
+    taskStatusStreamHandleRef.current?.close?.();
+    taskStatusStreamHandleRef.current = null;
+    taskStatusStreamRequestIdsRef.current = [];
+    taskStatusStreamPasswordRef.current = "";
+  }
+
+  useEffect(() => {
+    return () => {
+      closeTaskStatusStream();
+    };
+  }, []);
+
+  useEffect(() => {
+    const shouldSubscribe =
+      sessionState === "ready" &&
+      Boolean(activePw) &&
+      recoverableRequestTasks.length > 0 &&
+      taskRecoveryPauseCount === 0 &&
+      !studioPending &&
+      !enhancePending;
+
+    if (!shouldSubscribe) {
+      closeTaskStatusStream();
+      return;
+    }
+
+    const desiredRequestIds = recoverableRequestTasks.map((task) => task.requestId);
+    const currentRequestIds = taskStatusStreamRequestIdsRef.current;
+    const hasActiveStream = Boolean(taskStatusStreamHandleRef.current);
+    const samePassword = taskStatusStreamPasswordRef.current === activePw;
+    const alreadyWatchingDesiredTasks =
+      hasActiveStream &&
+      samePassword &&
+      desiredRequestIds.every((requestId) => currentRequestIds.includes(requestId));
+
+    if (alreadyWatchingDesiredTasks) {
+      return;
+    }
+
+    const recoverTaskResultIfNeeded = async (requestId) => {
+      if (
+        !requestId ||
+        taskRecoveryInFlightRequestIdsRef.current.has(requestId)
+      ) {
+        return;
+      }
+
+      const requestTask =
+        useTaskStore
+          .getState()
+          .requestTasks.find((task) => task.requestId === requestId) || null;
+
+      if (!requestTask || requestTask.status === "recovered") {
+        return;
+      }
+
+      taskRecoveryInFlightRequestIdsRef.current.add(requestId);
+
+      try {
+        await recoverRequestTaskFromServer(requestTask);
+      } finally {
+        taskRecoveryInFlightRequestIdsRef.current.delete(requestId);
+      }
+    };
+
+    closeTaskStatusStream();
+
+    const streamGeneration = taskStatusStreamGenerationRef.current + 1;
+    taskStatusStreamGenerationRef.current = streamGeneration;
+    taskStatusStreamRequestIdsRef.current = desiredRequestIds.slice();
+    taskStatusStreamPasswordRef.current = activePw;
+
+    const connectTaskStream = () => {
+      if (taskStatusStreamGenerationRef.current !== streamGeneration) {
+        return;
+      }
+
+      taskStatusStreamHandleRef.current = subscribeTaskStatusStream(
+        activePw,
+        desiredRequestIds,
+        {
+          onStatus: (eventPayload) => {
+            if (
+              taskStatusStreamGenerationRef.current !== streamGeneration ||
+              !eventPayload?.requestId ||
+              eventPayload?.stage === "heartbeat"
+            ) {
+              return;
+            }
+
+            const currentTask =
+              useTaskStore
+                .getState()
+                .requestTasks.find((task) => task.requestId === eventPayload.requestId) || null;
+
+            if (isOrphanedPendingRequestTask(currentTask, eventPayload.backendStartedAt)) {
+              updateRequestTask(eventPayload.requestId, buildOrphanedRequestTaskPatch(currentTask));
+              return;
+            }
+
+            updateRequestTask(eventPayload.requestId, {
+              status: normalizeRequestTaskProgress(eventPayload)?.status || eventPayload.status,
+              stage: eventPayload.stage || "accepted",
+              message: eventPayload.message || "",
+              error: eventPayload.error || "",
+              canRetry: eventPayload.canRetry !== false,
+              queuePosition: eventPayload.queuePosition || 0,
+              queueActiveCount: eventPayload.queueActiveCount || 0,
+              queuePendingCount: eventPayload.queuePendingCount || 0,
+              queueConcurrency: eventPayload.queueConcurrency || 0,
+              queueRateLimitWaitMs: eventPayload.queueRateLimitWaitMs || 0,
+              queueRateLimitedUntil: eventPayload.queueRateLimitedUntil || "",
+            });
+
+            if (eventPayload.status === "succeeded") {
+              void recoverTaskResultIfNeeded(eventPayload.requestId);
+            }
+          },
+        },
+      );
+
+      taskStatusStreamHandleRef.current.ready
+        .then(() => {})
+        .catch(() => {
+          if (taskStatusStreamGenerationRef.current !== streamGeneration) {
+            return;
+          }
+
+          if (taskStatusStreamReconnectTimeoutRef.current) {
+            window.clearTimeout(taskStatusStreamReconnectTimeoutRef.current);
+          }
+
+          taskStatusStreamReconnectTimeoutRef.current = window.setTimeout(() => {
+            taskStatusStreamReconnectTimeoutRef.current = 0;
+            connectTaskStream();
+          }, 1500);
+        });
+    };
+
+    connectTaskStream();
+  }, [
+    activePw,
+    enhancePending,
+    recoverableRequestTaskSignature,
+    sessionState,
+    taskRecoveryPauseCount,
+    studioPending,
+    updateRequestTask,
+  ]);
 
   const selectedModel = useMemo(() => {
     return models.find((item) => item.id === professionalSelectedModelId) || null;
@@ -3762,6 +4607,75 @@ function BananaStudioApp({ routeMode = "login" }) {
     professionalLayoutColumns,
     professionalLayoutRows,
   ]);
+
+  useEffect(() => {
+    if (!storyboardCellsHydrated) {
+      return;
+    }
+
+    setStoryboardCells((currentValue) => {
+      const latestStoryboardTaskByCellId = new Map();
+
+      requestTasks.forEach((task) => {
+        const storyboardCellId =
+          normalizeTextValue(task?.storyboardCellId) ||
+          findStoryboardCellIdByPendingRequestId(currentValue, task?.requestId);
+
+        if (!storyboardCellId || !currentValue[storyboardCellId]) {
+          return;
+        }
+
+        const taskTimeMs =
+          parseRequestTaskTimeMs(task?.updatedAt) || parseRequestTaskTimeMs(task?.createdAt);
+        const currentTask = latestStoryboardTaskByCellId.get(storyboardCellId);
+        const currentTaskTimeMs = currentTask
+          ? parseRequestTaskTimeMs(currentTask?.updatedAt) ||
+            parseRequestTaskTimeMs(currentTask?.createdAt)
+          : 0;
+
+        if (!currentTask || taskTimeMs >= currentTaskTimeMs) {
+          latestStoryboardTaskByCellId.set(storyboardCellId, task);
+        }
+      });
+
+      if (latestStoryboardTaskByCellId.size === 0) {
+        return currentValue;
+      }
+
+      let hasChanges = false;
+      const nextValue = { ...currentValue };
+
+      latestStoryboardTaskByCellId.forEach((task, cellId) => {
+        const currentCell = currentValue[cellId];
+
+        if (!currentCell) {
+          return;
+        }
+
+        const patch = buildStoryboardCellTaskPatch(task, currentCell);
+
+        if (!patch) {
+          return;
+        }
+
+        const nextCell = {
+          ...currentCell,
+          ...patch,
+        };
+
+        if (
+          nextCell.status !== currentCell.status ||
+          nextCell.statusText !== currentCell.statusText ||
+          nextCell.error !== currentCell.error
+        ) {
+          nextValue[cellId] = nextCell;
+          hasChanges = true;
+        }
+      });
+
+      return hasChanges ? nextValue : currentValue;
+    });
+  }, [requestTasks, storyboardCellsHydrated]);
 
   useEffect(() => {
     if (!storyboardCellsHydrated || typeof window === "undefined") {
@@ -5255,6 +6169,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
       updateStoryboardCell(storyboardEditorCellId, (cell) => ({
         ...cell,
+        pendingRequestId: "",
         status: "success",
         statusText: successText,
         error: "",
@@ -5297,6 +6212,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     updateStoryboardCell(storyboardEditorCellId, (cell) => ({
       ...cell,
+      pendingRequestId: "",
       status: "success",
       statusText: "已复用资源管理器中的图片，仅作用于当前格子",
       error: "",
@@ -5359,6 +6275,232 @@ function BananaStudioApp({ routeMode = "login" }) {
     }, 1800);
   }
 
+  async function executeStoryboardCellTask({
+    editorCell,
+    modelId,
+    requestedPromptValue,
+    storyboardAspectRatio,
+    storyboardImageSize,
+    globalReferenceImageRecords,
+  }) {
+    if (!editorCell || !activePw) {
+      return;
+    }
+
+    const cellId = editorCell.id;
+    const previousRecord = editorCell.record || null;
+    const requestRecord = upsertRequestTask({
+      requestId: createClientRequestId(),
+      type: "storyboard",
+      mode: "professional",
+      canRetry: true,
+      promptSnapshot: requestedPromptValue,
+      storyboardCellId: cellId,
+      storyboardCellLabel: editorCell.label,
+      storyboardCellCoordinate: editorCell.coordinateLabel,
+      createdAt: new Date().toISOString(),
+      status: "accepted",
+      stage: "accepted",
+      message: `${editorCell.label} 请求已提交，等待后端接收...`,
+    });
+
+    if (requestRecord?.requestId) {
+      setRequestTaskRetryHandler(requestRecord.requestId, async () => {
+        await executeStoryboardCellTask({
+          editorCell,
+          modelId,
+          requestedPromptValue,
+          storyboardAspectRatio,
+          storyboardImageSize,
+          globalReferenceImageRecords,
+        });
+      });
+    }
+
+    updateStoryboardCell(cellId, (cell) => ({
+      ...cell,
+      pendingRequestId: requestRecord?.requestId || "",
+      status: "loading",
+      statusText: "banana 正在生图...",
+      error: "",
+    }));
+    const releaseTaskRecoveryPause = beginTaskRecoveryPause();
+
+    try {
+      const mergedReferenceImages = [
+        ...buildProfessionalReferenceImages(globalReferenceImageRecords),
+        ...buildProfessionalReferenceImages(
+          editorCell.referenceImages,
+          STORYBOARD_CELL_REFERENCE_LIMIT,
+        ),
+      ];
+      const data = await requestProfessionalGeneration(
+        activePw,
+        {
+          ...buildProfessionalGenerationPayload({
+            modelId,
+            prompt: requestedPromptValue,
+            aspectRatio: storyboardAspectRatio,
+            imageSize: storyboardImageSize,
+            imageCount: 1,
+            layoutRows: 1,
+            layoutColumns: 1,
+            referenceImages: mergedReferenceImages,
+          }),
+          clientRequestId: requestRecord?.requestId,
+        },
+        {
+          onStatus: (eventPayload) => {
+            if (!eventPayload?.message) {
+              if (requestRecord?.requestId) {
+                const nextTaskProgress = normalizeRequestTaskProgress({
+                  ...requestRecord,
+                  ...eventPayload,
+                });
+
+                if (nextTaskProgress) {
+                  updateRequestTask(requestRecord.requestId, nextTaskProgress);
+                }
+              }
+
+              return;
+            }
+
+            updateStoryboardCell(cellId, (cell) => ({
+              ...cell,
+              pendingRequestId: requestRecord?.requestId || cell.pendingRequestId,
+              statusText: eventPayload.message,
+            }));
+
+            if (requestRecord?.requestId) {
+              const nextTaskProgress = normalizeRequestTaskProgress({
+                ...requestRecord,
+                ...eventPayload,
+                message: `${editorCell.label} · ${eventPayload.message}`,
+              });
+
+              if (nextTaskProgress) {
+                updateRequestTask(requestRecord.requestId, nextTaskProgress);
+              }
+            }
+          },
+        },
+      );
+      const nextResult = buildGeneratedImageRecord(data, {
+        promptSnapshot: requestedPromptValue,
+        storyboardCellId: cellId,
+        storyboardCellLabel: editorCell.label,
+        storyboardCellCoordinate: editorCell.coordinateLabel,
+      });
+
+      if (!nextResult) {
+        throw new Error("banana 没有返回可用图片");
+      }
+
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        pendingRequestId: "",
+        status: "success",
+        statusText: "生成完成",
+        error: "",
+        record: nextResult,
+      }));
+      setCurrentGenerationSelection([nextResult], nextResult);
+      setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
+      updateRequestTask(requestRecord?.requestId, {
+        status: "succeeded",
+        stage: "result",
+        message: `${editorCell.label} 生成完成`,
+        error: "",
+        queuePosition: 0,
+        queueRateLimitWaitMs: 0,
+      });
+
+      try {
+        await persistGeneratedRecord(nextResult);
+      } catch (error) {
+        console.warn("Persist storyboard cell result failed:", error);
+        updateStoryboardCell(cellId, (cell) => ({
+          ...cell,
+          error: "图片已生成，但写入本地资源管理器失败",
+        }));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "banana 生图失败";
+
+      if (error?.status) {
+        updateRequestTask(requestRecord?.requestId, {
+          status: "failed",
+          stage: "error",
+          message: `${editorCell.label} 生成失败`,
+          error: message,
+        });
+      } else {
+        try {
+          const recoveryOutcome = await recoverRequestTaskFromServer(requestRecord);
+
+          if (recoveryOutcome.state === "recovered" && recoveryOutcome.data?.result) {
+            const recoveredResult = buildGeneratedImageRecord(recoveryOutcome.data.result, {
+              promptSnapshot: requestedPromptValue,
+              storyboardCellId: cellId,
+              storyboardCellLabel: editorCell.label,
+              storyboardCellCoordinate: editorCell.coordinateLabel,
+            });
+
+            if (recoveredResult) {
+              updateStoryboardCell(cellId, (cell) => ({
+                ...cell,
+                status: "success",
+                statusText: "已恢复上一次请求的图片结果",
+                error: "",
+                pendingRequestId: "",
+                record: recoveredResult,
+              }));
+              return;
+            }
+          }
+
+          if (recoveryOutcome.state === "failed" || recoveryOutcome.state === "missing") {
+            updateStoryboardCell(cellId, (cell) => ({
+              ...cell,
+              status: previousRecord ? "success" : "idle",
+              statusText: "",
+              error: message,
+              pendingRequestId: "",
+              record: previousRecord,
+            }));
+            return;
+          }
+        } catch {
+          updateRequestTask(requestRecord?.requestId, {
+            status: "processing",
+            stage: "processing",
+            message: `${editorCell.label} 网络中断，等待自动恢复`,
+          });
+        }
+      }
+
+      updateStoryboardCell(cellId, (cell) => ({
+        ...cell,
+        pendingRequestId: !error?.status && requestRecord?.requestId ? requestRecord.requestId : "",
+        status:
+          !error?.status && requestRecord?.requestId
+            ? "loading"
+            : previousRecord
+              ? "success"
+              : "idle",
+        statusText:
+          !error?.status && requestRecord?.requestId
+            ? "连接已中断，banana 正在后端继续生成，恢复联网后会自动取回结果。"
+            : "",
+        error: !error?.status && requestRecord?.requestId ? "" : message,
+        record: previousRecord,
+      }));
+    } finally {
+      releaseTaskRecoveryPause();
+    }
+  }
+
   async function handleStoryboardCellGenerate() {
     if (!storyboardEditorCell || !activePw) {
       return;
@@ -5366,7 +6508,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     const editorCell = storyboardEditorCell;
     const cellId = editorCell.id;
-    const promptValue = normalizeTextValue(storyboardEditorCell.prompt);
+    const promptValue = normalizeTextValue(editorCell.prompt);
     const requestedPromptValue = buildProfessionalStoryboardPrompt(
       professionalGlobalPrompt,
       promptValue,
@@ -5388,86 +6530,183 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    const previousRecord = editorCell.record || null;
+    await executeStoryboardCellTask({
+      editorCell,
+      modelId: generationModelId,
+      requestedPromptValue,
+      storyboardAspectRatio: professionalStoryboardAspectRatioValue,
+      storyboardImageSize: professionalStoryboardImageSizeValue,
+      globalReferenceImageRecords: referenceImages,
+    });
+  }
 
-    updateStoryboardCell(cellId, (cell) => ({
-      ...cell,
-      status: "loading",
-      statusText: "banana 正在生图...",
-      error: "",
-    }));
+  async function executeGenerationTask({
+    mode,
+    modelId,
+    prompt,
+    aspectRatio,
+    imageSize,
+    imageCount,
+    layoutRows,
+    layoutColumns,
+    referenceImageRecords,
+  }) {
+    const isSimpleTask = mode === "simple";
+
+    setStudioPending(true);
+    setStudioError("");
+    setStudioNotice("");
+    const releaseBackendRequest = beginBackendRequest(
+      "banana 正在生图...",
+      secondsToEstimateMs(60),
+    );
+    const releaseTaskRecoveryPause = beginTaskRecoveryPause();
+    const promptSnapshot = prompt;
+    const requestRecord = upsertRequestTask({
+      requestId: createClientRequestId(),
+      type: "generation",
+      mode: isSimpleTask ? "simple" : "professional",
+      canRetry: true,
+      promptSnapshot,
+      createdAt: new Date().toISOString(),
+      status: "accepted",
+      stage: "accepted",
+      message: "请求已提交，等待后端接收...",
+    });
+
+    if (requestRecord?.requestId) {
+      setRequestTaskRetryHandler(requestRecord.requestId, async () => {
+        await executeGenerationTask({
+          mode,
+          modelId,
+          prompt,
+          aspectRatio,
+          imageSize,
+          imageCount,
+          layoutRows,
+          layoutColumns,
+          referenceImageRecords,
+        });
+      });
+    }
 
     try {
-      const mergedReferenceImages = [
-        ...buildProfessionalReferenceImages(referenceImages),
-        ...buildProfessionalReferenceImages(
-          editorCell.referenceImages,
-          STORYBOARD_CELL_REFERENCE_LIMIT,
-        ),
-      ];
-      const data = await requestProfessionalGeneration(
-        activePw,
-        buildProfessionalGenerationPayload({
-          modelId: generationModelId,
-          prompt: requestedPromptValue,
-          aspectRatio: professionalStoryboardAspectRatioValue,
-          imageSize: professionalStoryboardImageSizeValue,
-          imageCount: 1,
-          layoutRows: 1,
-          layoutColumns: 1,
-          referenceImages: mergedReferenceImages,
-        }),
-        {
-          onStatus: (eventPayload) => {
-            if (!eventPayload?.message) {
-              return;
-            }
+      const payload = isSimpleTask
+        ? {
+            ...buildSimpleGenerationPayload({
+              modelId,
+              prompt,
+              aspectRatio,
+              imageSize,
+              imageCount,
+              referenceImages: buildProfessionalReferenceImages(referenceImageRecords),
+            }),
+            clientRequestId: requestRecord?.requestId,
+          }
+        : {
+            ...buildProfessionalGenerationPayload({
+              modelId,
+              prompt,
+              aspectRatio,
+              imageSize,
+              imageCount,
+              layoutRows,
+              layoutColumns,
+              referenceImages: buildProfessionalReferenceImages(referenceImageRecords),
+            }),
+            clientRequestId: requestRecord?.requestId,
+          };
 
-            updateStoryboardCell(cellId, (cell) => ({
-              ...cell,
-              statusText: eventPayload.message,
-            }));
-          },
+      const requestGenerate = isSimpleTask
+        ? requestSimpleGeneration
+        : requestProfessionalGeneration;
+
+      const data = await requestGenerate(activePw, payload, {
+        onStatus: (eventPayload) => {
+          if (eventPayload?.message) {
+            setBackendBusyLabel(eventPayload.message);
+          }
+
+          if (requestRecord?.requestId) {
+            const nextTaskProgress = normalizeRequestTaskProgress({
+              ...requestRecord,
+              ...eventPayload,
+            });
+
+            if (nextTaskProgress) {
+              updateRequestTask(requestRecord.requestId, nextTaskProgress);
+            }
+          }
         },
-      );
-      const nextResult = buildGeneratedImageRecord(data, {
-        promptSnapshot: requestedPromptValue,
-        storyboardCellId: cellId,
-        storyboardCellLabel: editorCell.label,
-        storyboardCellCoordinate: editorCell.coordinateLabel,
+        onText: (eventPayload) => {
+          const previewText = formatStreamPreviewText(
+            eventPayload?.aggregatedText || eventPayload?.text,
+          );
+
+          if (previewText) {
+            setBackendBusyStreamText(previewText);
+          }
+        },
+      });
+      const nextResults = buildGeneratedImageRecords(data, {
+        promptSnapshot,
       });
 
-      if (!nextResult) {
+      if (nextResults.length === 0) {
         throw new Error("banana 没有返回可用图片");
       }
 
-      updateStoryboardCell(cellId, (cell) => ({
-        ...cell,
-        status: "success",
-        statusText: "生成完成",
-        error: "",
-        record: nextResult,
-      }));
-      setCurrentGenerationSelection([nextResult], nextResult);
+      setCurrentGenerationSelection(nextResults, nextResults[0]);
       setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
+      setStudioNotice("");
+      updateRequestTask(requestRecord?.requestId, {
+        status: "succeeded",
+        stage: "result",
+        message: "生成完成",
+        error: "",
+        queuePosition: 0,
+        queueRateLimitWaitMs: 0,
+      });
 
       try {
-        await persistGeneratedRecord(nextResult);
+        await persistGeneratedRecords(nextResults, nextResults[0].id);
       } catch (error) {
-        console.warn("Persist storyboard cell result failed:", error);
-        updateStoryboardCell(cellId, (cell) => ({
-          ...cell,
-          error: "图片已生成，但写入本地资源管理器失败",
-        }));
+        console.warn("Persist generated result failed:", error);
+        setStudioError("图片已生成，但写入本地资源管理器失败");
       }
     } catch (error) {
-      updateStoryboardCell(cellId, (cell) => ({
-        ...cell,
-        status: previousRecord ? "success" : "idle",
-        statusText: "",
-        error: error instanceof Error ? error.message : "banana 生图失败",
-        record: previousRecord,
-      }));
+      const message = error instanceof Error ? error.message : "banana 生图失败";
+
+      if (error?.status) {
+        setStudioNotice("");
+        setStudioError(message);
+        updateRequestTask(requestRecord?.requestId, {
+          status: "failed",
+          stage: "error",
+          message,
+          error: message,
+        });
+      } else {
+        try {
+          const recoveryOutcome = await recoverRequestTaskFromServer(requestRecord);
+
+          if (recoveryOutcome.state === "recovered") {
+            return;
+          }
+
+          if (recoveryOutcome.state === "failed" || recoveryOutcome.state === "missing") {
+            return;
+          }
+        } catch {
+          setStudioNotice("网络波动后已切换到自动恢复模式，恢复联网后会继续补取结果。");
+        }
+
+        setStudioError("连接已中断，banana 仍在后端继续生成。恢复联网后会自动取回结果。");
+      }
+    } finally {
+      releaseTaskRecoveryPause();
+      releaseBackendRequest();
+      setStudioPending(false);
     }
   }
 
@@ -5484,116 +6723,95 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    setStudioPending(true);
-    setStudioError("");
-    const releaseBackendRequest = beginBackendRequest(
-      "banana 正在生图...",
-      secondsToEstimateMs(60),
-    );
-
-    try {
-      const payload = isSimplePanelMode
-        ? buildSimpleGenerationPayload({
-            modelId: generationModelId,
-            prompt: simplePrompt,
-            aspectRatio: generationAspectRatio,
-            imageSize: generationImageSize,
-            imageCount: generationImageCount,
-            referenceImages: buildProfessionalReferenceImages(simpleReferenceImages),
-          })
-        : buildProfessionalGenerationPayload({
-            modelId: generationModelId,
-            prompt: professionalGlobalPrompt,
-            aspectRatio: generationAspectRatio,
-            imageSize: generationImageSize,
-            imageCount: generationImageCount,
-            layoutRows: generationLayoutRows,
-            layoutColumns: generationLayoutColumns,
-            referenceImages: buildProfessionalReferenceImages(referenceImages),
-          });
-
-      const requestGenerate = isSimplePanelMode
-        ? requestSimpleGeneration
-        : requestProfessionalGeneration;
-
-      const data = await requestGenerate(activePw, payload, {
-        onStatus: (eventPayload) => {
-          if (eventPayload?.message) {
-            setBackendBusyLabel(eventPayload.message);
-          }
-        },
-        onText: (eventPayload) => {
-          const previewText = formatStreamPreviewText(
-            eventPayload?.aggregatedText || eventPayload?.text,
-          );
-
-          if (previewText) {
-            setBackendBusyStreamText(previewText);
-          }
-        },
-      });
-      const nextResults = buildGeneratedImageRecords(data, {
-        promptSnapshot: isSimplePanelMode ? simplePrompt : professionalGlobalPrompt,
-      });
-
-      if (nextResults.length === 0) {
-        throw new Error("banana 没有返回可用图片");
-      }
-
-      setCurrentGenerationSelection(nextResults, nextResults[0]);
-      setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
-
-      try {
-        await persistGeneratedRecords(nextResults, nextResults[0].id);
-      } catch (error) {
-        console.warn("Persist generated result failed:", error);
-        setStudioError("图片已生成，但写入本地资源管理器失败");
-      }
-    } catch (error) {
-      setStudioError(error instanceof Error ? error.message : "banana 生图失败");
-    } finally {
-      releaseBackendRequest();
-      setStudioPending(false);
-    }
+    await executeGenerationTask({
+      mode: isSimplePanelMode ? "simple" : "professional",
+      modelId: generationModelId,
+      prompt: isSimplePanelMode ? simplePrompt : professionalGlobalPrompt,
+      aspectRatio: generationAspectRatio,
+      imageSize: generationImageSize,
+      imageCount: generationImageCount,
+      layoutRows: generationLayoutRows,
+      layoutColumns: generationLayoutColumns,
+      referenceImageRecords: isSimplePanelMode ? simpleReferenceImages : referenceImages,
+    });
   }
 
-  async function handleEnhanceGeneration() {
-    if (!generationResult || !canEnhanceGeneration || !activePw) {
+  async function executeEnhancementTask({
+    sourceGenerationRecord,
+    promptSnapshot,
+    targetImageSize,
+  }) {
+    if (!sourceGenerationRecord || !activePw) {
       return;
     }
 
     setEnhancePending(true);
     setStudioError("");
+    setStudioNotice("");
     const releaseBackendRequest = beginBackendRequest(
-      enhancementTargetImageSize
-        ? `正在提升到 ${enhancementTargetImageSize}...`
+      targetImageSize
+        ? `正在提升到 ${targetImageSize}...`
         : "正在提升清晰度...",
       secondsToEstimateMs(60),
     );
+    const releaseTaskRecoveryPause = beginTaskRecoveryPause();
+    const requestRecord = upsertRequestTask({
+      requestId: createClientRequestId(),
+      type: "enhance",
+      mode: "enhance",
+      canRetry: true,
+      promptSnapshot,
+      createdAt: new Date().toISOString(),
+      status: "accepted",
+      stage: "accepted",
+      message: "请求已提交，等待后端接收...",
+    });
+
+    if (requestRecord?.requestId) {
+      setRequestTaskRetryHandler(requestRecord.requestId, async () => {
+        await executeEnhancementTask({
+          sourceGenerationRecord,
+          promptSnapshot,
+          targetImageSize,
+        });
+      });
+    }
 
     try {
       const payload = {
-        modelId: generationResult.bananaModelId,
-        prompt: generationResult.promptSnapshot || simplePrompt,
+        modelId: sourceGenerationRecord.bananaModelId,
+        prompt: promptSnapshot,
         sourceImage: {
-          name: `enhance-source-${generationResult.savedRecord?.id || "current"}.png`,
-          mimeType: generationResult.mimeType,
-          data: generationResult.imageBase64,
+          name: `enhance-source-${sourceGenerationRecord.savedRecord?.id || "current"}.png`,
+          mimeType: sourceGenerationRecord.mimeType,
+          data: sourceGenerationRecord.imageBase64,
         },
         imageOptions: {
-          aspectRatio: generationResult.aspectRatio || professionalDefaultCellAspectRatio,
-          imageSize: enhancementTargetImageSize,
-          layoutRows: generationResult.layoutRows || professionalLayoutRows,
-          layoutColumns: generationResult.layoutColumns || professionalLayoutColumns,
+          aspectRatio: sourceGenerationRecord.aspectRatio || professionalDefaultCellAspectRatio,
+          imageSize: targetImageSize,
+          layoutRows: sourceGenerationRecord.layoutRows || professionalLayoutRows,
+          layoutColumns: sourceGenerationRecord.layoutColumns || professionalLayoutColumns,
         },
         // Preserve panel structure through text instructions instead of sending the
         // local guide canvas, which can leak guide visuals into the final image.
         layoutGuideImage: null,
+        clientRequestId: requestRecord?.requestId,
       };
       const data = await requestEnhancement(activePw, payload, {
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
+          }
+
+          if (requestRecord?.requestId) {
+            const nextTaskProgress = normalizeRequestTaskProgress({
+              ...requestRecord,
+              ...eventPayload,
+            });
+
+            if (nextTaskProgress) {
+              updateRequestTask(requestRecord.requestId, nextTaskProgress);
+            }
           }
         },
         onText: (eventPayload) => {
@@ -5608,11 +6826,11 @@ function BananaStudioApp({ routeMode = "login" }) {
       });
       const nextResults = buildGeneratedImageRecords(
         {
-          ...(generationResult || {}),
+          ...(sourceGenerationRecord || {}),
           ...data,
         },
         {
-          promptSnapshot: generationResult?.promptSnapshot || simplePrompt,
+          promptSnapshot,
         },
       );
 
@@ -5624,6 +6842,15 @@ function BananaStudioApp({ routeMode = "login" }) {
 
       setCurrentGenerationSelection([nextResult], nextResult);
       setRemainingQuota(normalizeRemainingCredits(data?.quota?.remainingCredits));
+      setStudioNotice("");
+      updateRequestTask(requestRecord?.requestId, {
+        status: "succeeded",
+        stage: "result",
+        message: "提升完成",
+        error: "",
+        queuePosition: 0,
+        queueRateLimitWaitMs: 0,
+      });
 
       try {
         await persistGeneratedRecord(nextResult);
@@ -5632,11 +6859,51 @@ function BananaStudioApp({ routeMode = "login" }) {
         setStudioError("图片已生成，但写入本地资源管理器失败");
       }
     } catch (error) {
-      setStudioError(error instanceof Error ? error.message : "提升清晰度失败");
+      const message = error instanceof Error ? error.message : "提升清晰度失败";
+
+      if (error?.status) {
+        setStudioNotice("");
+        setStudioError(message);
+        updateRequestTask(requestRecord?.requestId, {
+          status: "failed",
+          stage: "error",
+          message,
+          error: message,
+        });
+      } else {
+        try {
+          const recoveryOutcome = await recoverRequestTaskFromServer(requestRecord);
+
+          if (recoveryOutcome.state === "recovered") {
+            return;
+          }
+
+          if (recoveryOutcome.state === "failed" || recoveryOutcome.state === "missing") {
+            return;
+          }
+        } catch {
+          setStudioNotice("网络波动后已切换到自动恢复模式，恢复联网后会继续补取结果。");
+        }
+
+        setStudioError("连接已中断，后端仍在继续提升图片。恢复联网后会自动取回结果。");
+      }
     } finally {
+      releaseTaskRecoveryPause();
       releaseBackendRequest();
       setEnhancePending(false);
     }
+  }
+
+  async function handleEnhanceGeneration() {
+    if (!generationResult || !canEnhanceGeneration || !activePw) {
+      return;
+    }
+
+    await executeEnhancementTask({
+      sourceGenerationRecord: generationResult,
+      promptSnapshot: generationResult?.promptSnapshot || simplePrompt,
+      targetImageSize: enhancementTargetImageSize,
+    });
   }
 
   function openImagePreview(record = generationResult) {
@@ -5998,6 +7265,46 @@ function BananaStudioApp({ routeMode = "login" }) {
           <img className="studio-brand-logo" src="/logo.png" alt="Banana Studio" decoding="async" />
         </div>
         <div className="topbar-actions">
+          <button
+            type="button"
+            className={`resource-manager-trigger task-manager-trigger${taskManagerOpen ? " is-active" : ""}`}
+            onClick={() => setTaskManagerOpen(true)}
+            aria-label={activeRequestTaskCount > 0 ? `打开任务列表，当前有 ${activeRequestTaskCount} 个进行中的任务` : "打开任务列表"}
+            title="任务列表"
+          >
+            <span
+              className={`task-manager-indicator${activeRequestTaskCount > 0 ? " is-active" : ""}`}
+              aria-hidden="true"
+            >
+              <span className="task-manager-indicator-core">
+                {activeRequestTaskCount > 0 ? (
+                  <span className="task-manager-indicator-count">{activeRequestTaskCount}</span>
+                ) : (
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="20"
+                    height="20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M8 6h12" />
+                    <path d="M8 12h12" />
+                    <path d="M8 18h12" />
+                    <path d="M4 6h.01" />
+                    <path d="M4 12h.01" />
+                    <path d="M4 18h.01" />
+                  </svg>
+                )}
+              </span>
+            </span>
+            <span className="resource-manager-trigger-label" aria-hidden="true">
+              任务
+            </span>
+          </button>
           <button
             type="button"
             className={`resource-manager-trigger${resourceManagerPending ? " is-pending" : ""}`}
@@ -7014,6 +8321,98 @@ function BananaStudioApp({ routeMode = "login" }) {
           </form>
         </section>
       </main>
+      {taskManagerOpen ? (
+        <div
+          className="task-manager-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="任务列表"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setTaskManagerOpen(false);
+            }
+          }}
+        >
+          <section className="task-manager-panel">
+            <div className="scenario-manager-windowbar">
+              <span className="finder-window-spacer" aria-hidden="true" />
+              <strong>任务列表</strong>
+              <button
+                type="button"
+                className="finder-close-button"
+                onClick={() => setTaskManagerOpen(false)}
+                aria-label="关闭任务列表"
+                title="关闭"
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <path d="M5 5l10 10" />
+                  <path d="M15 5L5 15" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="task-manager-body">
+              <div className="finder-browser-toolbar task-manager-toolbar">
+                <div className="finder-browser-title">
+                  <strong>当前与历史任务</strong>
+                  <span>这里会显示正在请求中的任务，以及断网后恢复过的任务状态。</span>
+                </div>
+                <div className="finder-browser-meta">
+                  <span>活跃 {activeRequestTaskCount}</span>
+                  <span>总计 {sortedRequestTasks.length}</span>
+                  <button
+                    type="button"
+                    className="ghost-button task-manager-clear-button"
+                    onClick={() => clearTerminalRequestTasks()}
+                    disabled={clearableRequestTaskCount === 0}
+                  >
+                    清理历史
+                  </button>
+                </div>
+              </div>
+
+              {sortedRequestTasks.length > 0 ? (
+                <div className="task-manager-list">
+                  {sortedRequestTasks.map((task) => (
+                    <article key={task.requestId} className={`task-manager-item is-${task.status}`}>
+                      <div className="task-manager-item-header">
+                        <div className="task-manager-item-copy">
+                          <strong>{buildRequestTaskMeta(task)}</strong>
+                          <span>{task.message || "等待状态更新..."}</span>
+                        </div>
+                        <span className={`task-manager-status-badge is-${task.status}`}>
+                          {getRequestTaskStatusLabel(task)}
+                        </span>
+                      </div>
+                      {buildRequestTaskQueueSummary(task) ? (
+                        <p className="task-manager-queue-note">{buildRequestTaskQueueSummary(task)}</p>
+                      ) : null}
+                      {task.error ? <p className="error-text task-manager-error">{task.error}</p> : null}
+                      {canRetryRequestTask(task) ? (
+                        <div className="task-manager-actions">
+                          <button
+                            type="button"
+                            className="ghost-button task-manager-retry-button"
+                            onClick={() => handleRetryRequestTask(task)}
+                            disabled={Boolean(retryingRequestTaskIds[task.requestId])}
+                          >
+                            {retryingRequestTaskIds[task.requestId] ? "重试中..." : "重试"}
+                          </button>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state task-manager-empty-state">
+                  <p>还没有任务。</p>
+                  <small>发起一次生图或提升清晰度后，这里会实时显示任务状态。</small>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
       {scenarioManagerOpen ? (
         <div
           className="scenario-manager-overlay"
@@ -7968,7 +9367,7 @@ function BananaStudioApp({ routeMode = "login" }) {
           </div>
         </div>
       ) : null}
-      {backendBusyOverlay}
+      {isProfessionalPanelMode ? backendBusyOverlay : null}
     </div>
   );
 }

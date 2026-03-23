@@ -21,6 +21,8 @@ GEMINI_MODEL_NANO_BANANA_2=gemini-3.1-flash-image-preview
 GOOGLE_CLOUD_PROJECT=
 GOOGLE_CLOUD_LOCATION=global
 GOOGLE_CLOUD_QUOTA_PROJECT=
+BANANA_GOOGLE_QUEUE_CONCURRENCY=2
+BANANA_GOOGLE_RATE_LIMIT_COOLDOWN_MS=15000
 PORT=23001
 ```
 
@@ -36,6 +38,9 @@ PORT=23001
 - 管理员可继续创建更多 `pw`，每个新 `pw` 默认有 `100` 张额度
 - `pw` 额度会在每次成功生图或提升清晰度时扣减 `1`
 - 结果图、提示词和元数据会保存到 `storage/generations/`
+- `BANANA_GOOGLE_QUEUE_CONCURRENCY` 控制后端同时向 Google 发送的最大请求数，默认 `2`
+- `BANANA_GOOGLE_RATE_LIMIT_COOLDOWN_MS` 控制遇到 Google `429` 后的全队列冷却时间，默认 `15000`
+- 如果你不确定怎么配，先保持 `BANANA_GOOGLE_QUEUE_CONCURRENCY=2`；只有确认 Vertex 配额足够稳定时再尝试调到 `3`
 
 ## Docker 开发
 

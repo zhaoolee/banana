@@ -27,7 +27,9 @@ const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
 const generationsDir = path.join(rootDir, "storage", "generations");
 const logsDir = path.join(rootDir, "storage", "logs");
+const requestsDir = path.join(rootDir, "storage", "requests");
 const pwStoreFilePath = path.join(rootDir, "storage", "pw-store.json");
+const BACKEND_STARTED_AT = new Date().toISOString();
 const port = Number(process.env.PORT || 23001);
 const host = (process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const ALL_SUPPORTED_ASPECT_RATIOS = [
@@ -661,6 +663,192 @@ function tryParseJson(text) {
 }
 
 const RETRYABLE_GOOGLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const DEFAULT_GOOGLE_QUEUE_CONCURRENCY = 2;
+const DEFAULT_GOOGLE_RATE_LIMIT_COOLDOWN_MS = 15 * 1000;
+let googleQueueActiveCount = 0;
+let googleQueueRateLimitedUntil = 0;
+let googleQueuePumpTimer = null;
+const googleQueuePendingJobs = [];
+
+function resolveGoogleQueueConcurrency() {
+  const rawValue = Number.parseInt(String(process.env.BANANA_GOOGLE_QUEUE_CONCURRENCY || ""), 10);
+
+  if (!Number.isFinite(rawValue) || rawValue <= 0) {
+    return DEFAULT_GOOGLE_QUEUE_CONCURRENCY;
+  }
+
+  return Math.min(rawValue, 8);
+}
+
+function getGoogleRateLimitCooldownMs() {
+  const rawValue = Number.parseInt(
+    String(process.env.BANANA_GOOGLE_RATE_LIMIT_COOLDOWN_MS || ""),
+    10,
+  );
+
+  if (!Number.isFinite(rawValue) || rawValue < 1000) {
+    return DEFAULT_GOOGLE_RATE_LIMIT_COOLDOWN_MS;
+  }
+
+  return Math.min(rawValue, 5 * 60 * 1000);
+}
+
+const GOOGLE_QUEUE_CONCURRENCY = resolveGoogleQueueConcurrency();
+
+function getGoogleQueueSnapshot() {
+  const now = Date.now();
+  const rateLimitWaitMs = Math.max(0, googleQueueRateLimitedUntil - now);
+
+  return {
+    concurrency: GOOGLE_QUEUE_CONCURRENCY,
+    activeCount: googleQueueActiveCount,
+    pendingCount: googleQueuePendingJobs.length,
+    rateLimitWaitMs,
+    rateLimitedUntil:
+      rateLimitWaitMs > 0 ? new Date(googleQueueRateLimitedUntil).toISOString() : "",
+  };
+}
+
+function buildGoogleQueueStatusEvent({
+  position = 0,
+  stage = "queued_google",
+  message = "",
+}) {
+  const snapshot = getGoogleQueueSnapshot();
+
+  return {
+    type: "status",
+    stage,
+    message,
+    queuePosition: position,
+    queueActiveCount: snapshot.activeCount,
+    queuePendingCount: snapshot.pendingCount,
+    queueConcurrency: snapshot.concurrency,
+    queueRateLimitWaitMs: snapshot.rateLimitWaitMs,
+    queueRateLimitedUntil: snapshot.rateLimitedUntil,
+  };
+}
+
+function buildQueuedGoogleMessage(position, snapshot = getGoogleQueueSnapshot()) {
+  const requestsAhead = Math.max(position - 1, 0);
+
+  if (snapshot.rateLimitWaitMs > 0) {
+    return requestsAhead > 0
+      ? `Google 当前限流，已进入后端队列，前方还有 ${requestsAhead} 个请求，预计至少 ${Math.ceil(snapshot.rateLimitWaitMs / 1000)} 秒后继续处理。`
+      : `Google 当前限流，已进入后端队列，预计至少 ${Math.ceil(snapshot.rateLimitWaitMs / 1000)} 秒后继续处理。`;
+  }
+
+  if (requestsAhead > 0) {
+    return `后端排队中，前方还有 ${requestsAhead} 个请求，当前执行 ${snapshot.activeCount}/${snapshot.concurrency}。`;
+  }
+
+  return snapshot.activeCount >= snapshot.concurrency
+    ? `后端排队中，当前执行 ${snapshot.activeCount}/${snapshot.concurrency}，正在等待空闲槽位...`
+    : "已进入后端队列，当前无需等待，正在准备发送到 Google...";
+}
+
+function notifyPendingGoogleQueueJobs() {
+  const snapshot = getGoogleQueueSnapshot();
+
+  googleQueuePendingJobs.forEach((job, index) => {
+    const position = index + 1;
+    job.onEvent?.(
+      buildGoogleQueueStatusEvent({
+        position,
+        stage: snapshot.rateLimitWaitMs > 0 ? "queued_google_rate_limited" : "queued_google",
+        message: buildQueuedGoogleMessage(position, snapshot),
+      }),
+    );
+  });
+}
+
+function scheduleGoogleQueuePump(delayMs = 0) {
+  if (googleQueuePumpTimer) {
+    clearTimeout(googleQueuePumpTimer);
+  }
+
+  googleQueuePumpTimer = setTimeout(() => {
+    googleQueuePumpTimer = null;
+    void pumpGoogleQueue();
+  }, Math.max(0, delayMs));
+}
+
+async function runGoogleQueueJob(job) {
+  try {
+    job.onEvent?.(
+      buildGoogleQueueStatusEvent({
+        position: 0,
+        stage: "dequeued_google",
+        message: "已轮到当前请求，正在发送到 Google...",
+      }),
+    );
+    const result = await job.run();
+    job.resolve(result);
+  } catch (error) {
+    job.reject(error);
+  } finally {
+    googleQueueActiveCount = Math.max(0, googleQueueActiveCount - 1);
+    notifyPendingGoogleQueueJobs();
+    void pumpGoogleQueue();
+  }
+}
+
+async function pumpGoogleQueue() {
+  if (googleQueueActiveCount >= GOOGLE_QUEUE_CONCURRENCY) {
+    return;
+  }
+
+  const snapshot = getGoogleQueueSnapshot();
+
+  if (snapshot.rateLimitWaitMs > 0) {
+    notifyPendingGoogleQueueJobs();
+    scheduleGoogleQueuePump(snapshot.rateLimitWaitMs);
+    return;
+  }
+
+  while (
+    googleQueueActiveCount < GOOGLE_QUEUE_CONCURRENCY &&
+    googleQueuePendingJobs.length > 0
+  ) {
+    const job = googleQueuePendingJobs.shift();
+
+    if (!job) {
+      break;
+    }
+
+    googleQueueActiveCount += 1;
+    notifyPendingGoogleQueueJobs();
+    void runGoogleQueueJob(job);
+  }
+}
+
+function registerGoogleRateLimit(retryDelayMs = 0) {
+  const cooldownMs = Math.max(retryDelayMs, getGoogleRateLimitCooldownMs());
+  googleQueueRateLimitedUntil = Math.max(
+    googleQueueRateLimitedUntil,
+    Date.now() + cooldownMs,
+  );
+  notifyPendingGoogleQueueJobs();
+  scheduleGoogleQueuePump(cooldownMs);
+}
+
+function enqueueGoogleRequest({ requestId, requestType, onEvent, run }) {
+  return new Promise((resolve, reject) => {
+    const job = {
+      id: `${requestId}:${requestType}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
+      requestId,
+      requestType,
+      onEvent,
+      run,
+      resolve,
+      reject,
+    };
+
+    googleQueuePendingJobs.push(job);
+    notifyPendingGoogleQueueJobs();
+    void pumpGoogleQueue();
+  });
+}
 
 function sleepWithSignal(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -722,6 +910,235 @@ function buildGenerationId() {
 
 function buildRequestId() {
   return crypto.randomBytes(6).toString("hex");
+}
+
+function sanitizeClientRequestId(value) {
+  const normalizedValue = normalizePrompt(value);
+
+  if (!normalizedValue) {
+    return "";
+  }
+
+  return /^[A-Za-z0-9_-]{8,80}$/.test(normalizedValue) ? normalizedValue : "";
+}
+
+function resolveRequestId(value) {
+  return sanitizeClientRequestId(value) || buildRequestId();
+}
+
+function getRequestStatePath(requestId) {
+  return path.join(requestsDir, `${requestId}.json`);
+}
+
+const taskStatusSubscribers = new Map();
+
+async function readRequestState(requestId) {
+  try {
+    const rawText = await fs.readFile(getRequestStatePath(requestId), "utf8");
+    return JSON.parse(rawText);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function buildRequestStateEventPayload(requestState) {
+  return {
+    backendStartedAt: BACKEND_STARTED_AT,
+    requestId: requestState?.requestId || "",
+    type: requestState?.type || "generation",
+    mode: requestState?.mode || "professional",
+    canRetry: Boolean(requestState?.requestPayload),
+    status: requestState?.status || "accepted",
+    stage: requestState?.stage || "accepted",
+    message: requestState?.message || "",
+    error: requestState?.error || "",
+    bananaModelId: requestState?.bananaModelId || "",
+    imageOptions: requestState?.imageOptions || null,
+    queuePosition: Number.isFinite(Number(requestState?.queuePosition))
+      ? Number(requestState.queuePosition)
+      : 0,
+    queueActiveCount: Number.isFinite(Number(requestState?.queueActiveCount))
+      ? Number(requestState.queueActiveCount)
+      : 0,
+    queuePendingCount: Number.isFinite(Number(requestState?.queuePendingCount))
+      ? Number(requestState.queuePendingCount)
+      : 0,
+    queueConcurrency: Number.isFinite(Number(requestState?.queueConcurrency))
+      ? Number(requestState.queueConcurrency)
+      : 0,
+    queueRateLimitWaitMs: Number.isFinite(Number(requestState?.queueRateLimitWaitMs))
+      ? Number(requestState.queueRateLimitWaitMs)
+      : 0,
+    queueRateLimitedUntil: requestState?.queueRateLimitedUntil || "",
+    createdAt: requestState?.createdAt || "",
+    updatedAt: requestState?.updatedAt || "",
+  };
+}
+
+function subscribeTaskStatus(requestId, subscriber) {
+  if (!requestId || typeof subscriber !== "function") {
+    return;
+  }
+
+  const currentSubscribers = taskStatusSubscribers.get(requestId) || new Set();
+  currentSubscribers.add(subscriber);
+  taskStatusSubscribers.set(requestId, currentSubscribers);
+}
+
+function unsubscribeTaskStatus(requestId, subscriber) {
+  const currentSubscribers = taskStatusSubscribers.get(requestId);
+
+  if (!currentSubscribers) {
+    return;
+  }
+
+  currentSubscribers.delete(subscriber);
+
+  if (currentSubscribers.size === 0) {
+    taskStatusSubscribers.delete(requestId);
+  }
+}
+
+function notifyTaskStatusSubscribers(requestId, requestState) {
+  const currentSubscribers = taskStatusSubscribers.get(requestId);
+
+  if (!currentSubscribers || currentSubscribers.size === 0) {
+    return;
+  }
+
+  const eventPayload = buildRequestStateEventPayload(requestState);
+
+  currentSubscribers.forEach((subscriber) => {
+    try {
+      subscriber(eventPayload, requestState);
+    } catch (_error) {
+      // Ignore broken subscribers; the response close handler will detach them.
+    }
+  });
+}
+
+async function writeRequestState(requestId, payload) {
+  const nextPayload = {
+    ...payload,
+    requestId,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await fs.mkdir(requestsDir, { recursive: true });
+  await fs.writeFile(
+    getRequestStatePath(requestId),
+    `${JSON.stringify(nextPayload, null, 2)}\n`,
+    "utf8",
+  );
+
+  notifyTaskStatusSubscribers(requestId, nextPayload);
+
+  return nextPayload;
+}
+
+function buildRequestProgressStatePatch(eventPayload = {}) {
+  const stage = normalizePrompt(eventPayload?.stage);
+  const queuePosition = Number.parseInt(String(eventPayload?.queuePosition ?? 0), 10);
+  const queueActiveCount = Number.parseInt(String(eventPayload?.queueActiveCount ?? 0), 10);
+  const queuePendingCount = Number.parseInt(String(eventPayload?.queuePendingCount ?? 0), 10);
+  const queueConcurrency = Number.parseInt(String(eventPayload?.queueConcurrency ?? 0), 10);
+  const queueRateLimitWaitMs = Number.parseInt(
+    String(eventPayload?.queueRateLimitWaitMs ?? 0),
+    10,
+  );
+  const queueRateLimitedUntil = normalizePrompt(eventPayload?.queueRateLimitedUntil);
+  let status = "processing";
+
+  if (stage === "queued_google" || stage === "queued_google_rate_limited") {
+    status = "queued";
+  } else if (stage === "saving") {
+    status = "saving";
+  } else if (stage === "accepted" || stage === "queued") {
+    status = "accepted";
+  }
+
+  return {
+    status,
+    stage: stage || "processing",
+    message: normalizePrompt(eventPayload?.message),
+    queuePosition: Number.isFinite(queuePosition) ? Math.max(queuePosition, 0) : 0,
+    queueActiveCount: Number.isFinite(queueActiveCount) ? Math.max(queueActiveCount, 0) : 0,
+    queuePendingCount: Number.isFinite(queuePendingCount) ? Math.max(queuePendingCount, 0) : 0,
+    queueConcurrency: Number.isFinite(queueConcurrency) ? Math.max(queueConcurrency, 0) : 0,
+    queueRateLimitWaitMs: Number.isFinite(queueRateLimitWaitMs)
+      ? Math.max(queueRateLimitWaitMs, 0)
+      : 0,
+    queueRateLimitedUntil,
+  };
+}
+
+function persistRequestProgressState({
+  requestId,
+  createdAt,
+  type,
+  route,
+  mode,
+  pwName,
+  bananaModelId,
+  imageOptions,
+  requestPayload,
+  eventPayload,
+}) {
+  return writeRequestState(requestId, {
+    createdAt,
+    type,
+    route,
+    mode,
+    pwName,
+    bananaModelId,
+    imageOptions,
+    requestPayload,
+    ...buildRequestProgressStatePatch(eventPayload),
+  });
+}
+
+function buildStoredGenerateRequestPayload({
+  route,
+  mode,
+  prompt,
+  bananaModel,
+  referenceImages,
+  layoutGuideImage,
+  imageOptions,
+}) {
+  return {
+    type: "generation",
+    route,
+    mode,
+    prompt,
+    modelId: bananaModel.id,
+    referenceImages,
+    layoutGuideImage,
+    imageOptions,
+  };
+}
+
+function buildStoredEnhanceRequestPayload({
+  prompt,
+  bananaModel,
+  sourceImage,
+  layoutGuideImage,
+  imageOptions,
+}) {
+  return {
+    type: "enhance",
+    route: "/api/enhance/stream",
+    mode: "enhance",
+    prompt,
+    modelId: bananaModel.id,
+    sourceImage,
+    layoutGuideImage,
+    imageOptions,
+  };
 }
 
 function getLogDateStamp(date = new Date()) {
@@ -805,6 +1222,95 @@ async function logBackend(level, message, meta = {}) {
   }
 }
 
+function buildStreamResultPayload({
+  ok = true,
+  mode = "professional",
+  bananaModel,
+  imageOptions,
+  result,
+  savedRecords,
+  quota,
+  requestId = "",
+}) {
+  return {
+    ok,
+    requestId,
+    mode,
+    bananaModelId: bananaModel.id,
+    bananaModelName: bananaModel.name,
+    bananaModelTone: bananaModel.tone,
+    bananaModelPriceLabel: bananaModel.priceLabel,
+    bananaModelPriceNote: bananaModel.priceNote,
+    providerModel: result.providerModel,
+    googleAuthMode: result.googleAuthMode,
+    googleBackend: result.googleBackend,
+    googleCloudProject: result.googleCloudProject,
+    googleCloudLocation: result.googleCloudLocation,
+    responseId: result.responseId,
+    aspectRatio: imageOptions.aspectRatio,
+    imageSize: imageOptions.imageSize,
+    layoutRows: imageOptions.layoutRows,
+    layoutColumns: imageOptions.layoutColumns,
+    imageCountRequested: imageOptions.imageCount,
+    imageCountReturned: result.images.length,
+    savedRecord: savedRecords[0] || null,
+    savedRecords,
+    mimeType: result.images[0]?.mimeType || "image/png",
+    imageBase64: result.images[0]?.imageBase64 || "",
+    images: result.images,
+    text: result.text,
+    quota,
+  };
+}
+
+function buildRecoverableResultPayload(payload = {}) {
+  const {
+    images: _images,
+    imageBase64: _imageBase64,
+    mimeType: _mimeType,
+    ...restPayload
+  } = payload;
+
+  return restPayload;
+}
+
+async function loadSavedImages(savedRecords = []) {
+  const loadedImages = await Promise.all(
+    savedRecords.map(async (savedRecord) => {
+      if (!savedRecord?.imagePath) {
+        return null;
+      }
+
+      const imageBuffer = await fs.readFile(savedRecord.imagePath);
+
+      return {
+        imageBase64: imageBuffer.toString("base64"),
+        mimeType: savedRecord.mimeType || "image/png",
+      };
+    }),
+  );
+
+  return loadedImages.filter(Boolean);
+}
+
+async function buildRecoveredRequestResult(payload = {}) {
+  const savedRecords = Array.isArray(payload.savedRecords)
+    ? payload.savedRecords
+    : payload.savedRecord
+      ? [payload.savedRecord]
+      : [];
+  const images = await loadSavedImages(savedRecords);
+
+  return {
+    ...payload,
+    savedRecord: savedRecords[0] || null,
+    savedRecords,
+    mimeType: images[0]?.mimeType || "image/png",
+    imageBase64: images[0]?.imageBase64 || "",
+    images,
+  };
+}
+
 function getFileExtensionFromMimeType(mimeType) {
   switch (mimeType) {
     case "image/jpeg":
@@ -883,6 +1389,8 @@ async function saveGenerationArtifacts({
     directory: generationPath,
     imagePath,
     metadataPath,
+    filename: imageFilename,
+    mimeType: resultMimeType,
   };
 }
 
@@ -1096,7 +1604,7 @@ async function parseSseResponseStream(stream, onMessage) {
   return eventCount;
 }
 
-async function generateImageWithGemini({
+async function executeGoogleImageGeneration({
   requestId,
   requestType,
   bananaModel,
@@ -1212,6 +1720,10 @@ async function generateImageWithGemini({
 
     if (isRetryable && attemptsRemaining > 0) {
       const retryDelayMs = Math.min(8000, 1200 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 350);
+
+      if (geminiResponse.status === 429) {
+        registerGoogleRateLimit(retryDelayMs);
+      }
 
       await logBackend("info", "Retrying Google request after transient failure", {
         requestId,
@@ -1462,6 +1974,38 @@ async function generateImageWithGemini({
     responseId: latestResponseId,
     usageMetadata: latestUsageMetadata,
   };
+}
+
+async function generateImageWithGemini({
+  requestId,
+  requestType,
+  bananaModel,
+  prompt,
+  referenceImages,
+  imageOptions,
+  layoutGuideImage,
+  additionalInstructions = [],
+  onEvent,
+  signal,
+}) {
+  return enqueueGoogleRequest({
+    requestId,
+    requestType,
+    onEvent,
+    run: () =>
+      executeGoogleImageGeneration({
+        requestId,
+        requestType,
+        bananaModel,
+        prompt,
+        referenceImages,
+        imageOptions,
+        layoutGuideImage,
+        additionalInstructions,
+        onEvent,
+        signal,
+      }),
+  });
 }
 
 function buildSingleImageOptions(imageOptions) {
@@ -2260,10 +2804,12 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
   return async (request, response) => {
     prepareSseResponse(response);
     const abortController = new AbortController();
-    const requestId = buildRequestId();
+    const requestId = resolveRequestId(request.body?.clientRequestId);
     const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
     let closed = false;
     let consumedQuotaAmount = 0;
+    const createdAt = new Date().toISOString();
+    let requestPayload = null;
 
     response.on("close", () => {
       if (response.writableEnded) {
@@ -2271,11 +2817,11 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
       }
 
       closed = true;
-      abortController.abort();
       void logBackend("info", "Client disconnected from generate stream", {
         requestId,
         route,
         mode,
+        continueProcessing: true,
       });
     });
 
@@ -2287,6 +2833,15 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         layoutGuideImage,
         imageOptions,
       } = sanitizeGeneratePayload(request.body, mode);
+      requestPayload = buildStoredGenerateRequestPayload({
+        route,
+        mode,
+        prompt,
+        bananaModel,
+        referenceImages,
+        layoutGuideImage,
+        imageOptions,
+      });
 
       if (mode === "simple" && !prompt) {
         await logBackend("info", "Rejected generate stream request: empty prompt", {
@@ -2299,12 +2854,30 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         return;
       }
 
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "generation",
+        route,
+        mode,
+        pwName: request.accessPayload.pwName,
+        status: "queued",
+        stage: "queued",
+        message: "请求已接收，等待后端准备...",
+        bananaModelId: bananaModel.id,
+        imageOptions,
+        requestPayload,
+      });
+
       let quotaRecord = await consumePwQuotaOrThrow(
         request.accessPayload.pwName,
         imageOptions.imageCount,
       );
 
       consumedQuotaAmount = imageOptions.imageCount;
+      const acceptedMessage =
+        imageOptions.imageCount > 1
+          ? `请求已接收，准备生成 ${imageOptions.imageCount} 张图片...`
+          : "请求已接收，正在整理提示词...";
 
       await logBackend("info", "Accepted generate stream request", {
         requestId,
@@ -2320,18 +2893,31 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         promptLength: prompt.length,
       });
 
-      writeSseEvent(response, "status", {
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "generation",
+        route,
+        mode,
+        pwName: request.accessPayload.pwName,
+        status: "accepted",
         stage: "accepted",
-        message:
-          imageOptions.imageCount > 1
-            ? `请求已接收，准备生成 ${imageOptions.imageCount} 张图片...`
-            : "请求已接收，正在整理提示词...",
-        requestId,
+        message: acceptedMessage,
         bananaModelId: bananaModel.id,
-        imageSize: imageOptions.imageSize,
-        imageCount: imageOptions.imageCount,
-        quota: buildPwSummary(quotaRecord),
+        imageOptions,
+        requestPayload,
       });
+
+      if (!closed) {
+        writeSseEvent(response, "status", {
+          stage: "accepted",
+          message: acceptedMessage,
+          requestId,
+          bananaModelId: bananaModel.id,
+          imageSize: imageOptions.imageSize,
+          imageCount: imageOptions.imageCount,
+          quota: buildPwSummary(quotaRecord),
+        });
+      }
 
       const result = await generateImagesWithGemini({
         requestId,
@@ -2343,15 +2929,33 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         layoutGuideImage,
         signal: abortController.signal,
         onEvent(eventPayload) {
+          if (eventPayload?.type === "status") {
+            void persistRequestProgressState({
+              requestId,
+              createdAt,
+              type: "generation",
+              route,
+              mode,
+              pwName: request.accessPayload.pwName,
+              bananaModelId: bananaModel.id,
+              imageOptions,
+              requestPayload,
+              eventPayload,
+            }).catch((error) => {
+              void logBackend("error", "Failed to persist generate stream progress", {
+                requestId,
+                route,
+                mode,
+                error,
+              });
+            });
+          }
+
           if (!closed) {
             writeSseEvent(response, eventPayload.type || "status", eventPayload);
           }
         },
       });
-
-      if (closed) {
-        return;
-      }
 
       const missingImageQuota = Math.max(0, consumedQuotaAmount - result.images.length);
 
@@ -2371,13 +2975,32 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         });
       }
 
-      writeSseEvent(response, "status", {
+      if (!closed) {
+        writeSseEvent(response, "status", {
+          stage: "saving",
+          message:
+            result.images.length > 1
+              ? `正在保存 ${result.images.length} 张生成结果...`
+              : "正在保存生成结果...",
+          requestId,
+        });
+      }
+
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "generation",
+        route,
+        mode,
+        pwName: request.accessPayload.pwName,
+        status: "saving",
         stage: "saving",
         message:
           result.images.length > 1
             ? `正在保存 ${result.images.length} 张生成结果...`
             : "正在保存生成结果...",
-        requestId,
+        bananaModelId: bananaModel.id,
+        imageOptions,
+        requestPayload,
       });
 
       const savedRecords = await saveGenerationArtifactsBatch({
@@ -2406,38 +3029,34 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         returnedImageCount: result.images.length,
       });
 
-      if (closed) {
-        return;
-      }
-
-      writeSseEvent(response, "result", {
-        ok: true,
+      const resultPayload = buildStreamResultPayload({
         mode,
-        bananaModelId: bananaModel.id,
-        bananaModelName: bananaModel.name,
-        bananaModelTone: bananaModel.tone,
-        bananaModelPriceLabel: bananaModel.priceLabel,
-        bananaModelPriceNote: bananaModel.priceNote,
-        providerModel: result.providerModel,
-        googleAuthMode: result.googleAuthMode,
-        googleBackend: result.googleBackend,
-        googleCloudProject: result.googleCloudProject,
-        googleCloudLocation: result.googleCloudLocation,
-        responseId: result.responseId,
-        aspectRatio: imageOptions.aspectRatio,
-        imageSize: imageOptions.imageSize,
-        layoutRows: imageOptions.layoutRows,
-        layoutColumns: imageOptions.layoutColumns,
-        imageCountRequested: imageOptions.imageCount,
-        imageCountReturned: result.images.length,
-        savedRecord: savedRecords[0] || null,
+        bananaModel,
+        imageOptions,
+        result,
         savedRecords,
-        mimeType: result.images[0]?.mimeType || "image/png",
-        imageBase64: result.images[0]?.imageBase64 || "",
-        images: result.images,
-        text: result.text,
         quota: buildPwSummary(quotaRecord),
+        requestId,
       });
+
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "generation",
+        route,
+        mode,
+        pwName: request.accessPayload.pwName,
+        status: "succeeded",
+        stage: "result",
+        message: "生成完成",
+        bananaModelId: bananaModel.id,
+        imageOptions,
+        requestPayload,
+        result: buildRecoverableResultPayload(resultPayload),
+      });
+
+      if (!closed) {
+        writeSseEvent(response, "result", resultPayload);
+      }
     } catch (error) {
       if (consumedQuotaAmount > 0) {
         const refundAmount = consumedQuotaAmount;
@@ -2464,23 +3083,29 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         }
       }
 
-      if (closed && error?.name === "AbortError") {
-        await logBackend("info", "Generate stream request aborted after client disconnect", {
-          requestId,
-          route,
-          mode,
-        });
-      } else {
-        await logBackend("error", "Generate stream request failed", {
-          requestId,
-          route,
-          mode,
-          error,
-        });
-      }
+      const message = error instanceof Error ? error.message : "banana 生图失败";
+
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "generation",
+        route,
+        mode,
+        pwName: request.accessPayload?.pwName || "",
+        status: "failed",
+        stage: "error",
+        message,
+        error: message,
+        requestPayload,
+      });
+
+      await logBackend("error", "Generate stream request failed", {
+        requestId,
+        route,
+        mode,
+        error,
+      });
 
       if (!closed) {
-        const message = error instanceof Error ? error.message : "banana 生图失败";
         writeSseEvent(response, "error", { error: message });
       }
     } finally {
@@ -2673,13 +3298,220 @@ app.post(
   }),
 );
 
+app.post("/api/tasks/watch/stream", ensureAuthenticated, async (request, response) => {
+  prepareSseResponse(response);
+  const heartbeatTimer = startSseHeartbeat(response, () => ({
+    watchedRequestCount: Array.isArray(request.body?.requestIds) ? request.body.requestIds.length : 0,
+  }));
+  let closed = false;
+  const requestedIds = Array.isArray(request.body?.requestIds)
+    ? request.body.requestIds.map(sanitizeClientRequestId).filter(Boolean).slice(0, 50)
+    : [];
+  const watchedRequestIds = [];
+
+  const subscriber = (eventPayload, requestState) => {
+    if (closed || response.writableEnded || response.destroyed) {
+      return;
+    }
+
+    if (
+      requestState?.pwName &&
+      request.accessPayload?.pwName &&
+      requestState.pwName !== request.accessPayload.pwName
+    ) {
+      return;
+    }
+
+    writeSseEvent(response, "status", eventPayload);
+  };
+
+  response.on("close", () => {
+    if (closed) {
+      return;
+    }
+
+    closed = true;
+    clearInterval(heartbeatTimer);
+    watchedRequestIds.forEach((requestId) => unsubscribeTaskStatus(requestId, subscriber));
+  });
+
+  try {
+    for (const requestId of requestedIds) {
+      const requestState = await readRequestState(requestId);
+
+      if (
+        requestState &&
+        requestState.pwName &&
+        request.accessPayload?.pwName &&
+        requestState.pwName !== request.accessPayload.pwName
+      ) {
+        continue;
+      }
+
+      watchedRequestIds.push(requestId);
+      subscribeTaskStatus(requestId, subscriber);
+
+      if (requestState && !closed) {
+        writeSseEvent(response, "status", buildRequestStateEventPayload(requestState));
+      }
+    }
+  } catch (error) {
+    if (!closed) {
+      writeSseEvent(response, "error", {
+        error: error instanceof Error ? error.message : "订阅任务状态失败",
+      });
+      response.end();
+    }
+    return;
+  }
+});
+
+app.get("/api/generations/:requestId", ensureAuthenticated, async (request, response) => {
+  try {
+    const requestId = sanitizeClientRequestId(request.params.requestId);
+
+    if (!requestId) {
+      response.status(400).json({ error: "请求 ID 格式不正确" });
+      return;
+    }
+
+    const requestState = await readRequestState(requestId);
+
+    if (!requestState) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    if (
+      requestState.pwName &&
+      request.accessPayload?.pwName &&
+      requestState.pwName !== request.accessPayload.pwName
+    ) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    const currentPwRecord = await findPwRecord({
+      filePath: pwStoreFilePath,
+      name: request.accessPayload?.pwName || "",
+    });
+    const quota = currentPwRecord ? buildPwSummary(currentPwRecord) : null;
+
+    if (requestState.status === "succeeded") {
+      const recoveredResult = await buildRecoveredRequestResult(requestState.result);
+
+      response.json({
+        ok: true,
+        backendStartedAt: BACKEND_STARTED_AT,
+        requestId,
+        status: "succeeded",
+        stage: requestState.stage || "result",
+        message: requestState.message || "任务已完成",
+        result: {
+          ...recoveredResult,
+          requestId,
+          quota,
+        },
+      });
+      return;
+    }
+
+    response.json({
+      ok: true,
+      backendStartedAt: BACKEND_STARTED_AT,
+      requestId,
+      type: requestState.type || "generation",
+      mode: requestState.mode || "professional",
+      canRetry: Boolean(requestState.requestPayload),
+      status: requestState.status || "accepted",
+      stage: requestState.stage || "accepted",
+      message: requestState.message || "",
+      error: requestState.error || "",
+      bananaModelId: requestState.bananaModelId || "",
+      imageOptions: requestState.imageOptions || null,
+      queuePosition:
+        Number.isFinite(Number(requestState.queuePosition)) ? Number(requestState.queuePosition) : 0,
+      queueActiveCount:
+        Number.isFinite(Number(requestState.queueActiveCount))
+          ? Number(requestState.queueActiveCount)
+          : 0,
+      queuePendingCount:
+        Number.isFinite(Number(requestState.queuePendingCount))
+          ? Number(requestState.queuePendingCount)
+          : 0,
+      queueConcurrency:
+        Number.isFinite(Number(requestState.queueConcurrency))
+          ? Number(requestState.queueConcurrency)
+          : 0,
+      queueRateLimitWaitMs:
+        Number.isFinite(Number(requestState.queueRateLimitWaitMs))
+          ? Number(requestState.queueRateLimitWaitMs)
+          : 0,
+      queueRateLimitedUntil: requestState.queueRateLimitedUntil || "",
+      quota,
+      createdAt: requestState.createdAt || "",
+      updatedAt: requestState.updatedAt || "",
+    });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : "查询请求状态失败",
+    });
+  }
+});
+
+app.post("/api/generations/:requestId/retry", ensureAuthenticated, async (request, response) => {
+  try {
+    const requestId = sanitizeClientRequestId(request.params.requestId);
+
+    if (!requestId) {
+      response.status(400).json({ error: "缺少有效的请求 ID" });
+      return;
+    }
+
+    const requestState = await readRequestState(requestId);
+
+    if (!requestState) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    if (
+      requestState.pwName &&
+      request.accessPayload?.pwName &&
+      requestState.pwName !== request.accessPayload.pwName
+    ) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    if (!requestState.requestPayload || typeof requestState.requestPayload !== "object") {
+      response.status(400).json({ error: "当前任务没有可重试的请求体，请重新发起一次请求" });
+      return;
+    }
+
+    response.json({
+      ok: true,
+      requestId,
+      type: requestState.type || "generation",
+      mode: requestState.mode || "professional",
+      retryPayload: requestState.requestPayload,
+    });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : "读取重试请求体失败",
+    });
+  }
+});
+
 app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) => {
   prepareSseResponse(response);
   const abortController = new AbortController();
-  const requestId = buildRequestId();
+  const requestId = resolveRequestId(request.body?.clientRequestId);
   const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
   let closed = false;
   let consumedQuotaAmount = 0;
+  const createdAt = new Date().toISOString();
+  let requestPayload = null;
 
   response.on("close", () => {
     if (response.writableEnded) {
@@ -2687,10 +3519,10 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
     }
 
     closed = true;
-    abortController.abort();
     void logBackend("info", "Client disconnected from enhance stream", {
       requestId,
       route: "/api/enhance/stream",
+      continueProcessing: true,
     });
   });
 
@@ -2725,9 +3557,32 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       ...sanitizeImageOptions(request.body?.imageOptions, bananaModel),
       imageCount: 1,
     };
+    requestPayload = buildStoredEnhanceRequestPayload({
+      prompt,
+      bananaModel,
+      sourceImage,
+      layoutGuideImage,
+      imageOptions,
+    });
+
+    await writeRequestState(requestId, {
+      createdAt,
+      type: "enhance",
+      route: "/api/enhance/stream",
+      mode: "enhance",
+      pwName: request.accessPayload.pwName,
+      status: "queued",
+      stage: "queued",
+      message: "请求已接收，等待后端准备...",
+      bananaModelId: bananaModel.id,
+      imageOptions,
+      requestPayload,
+    });
+
     const quotaRecord = await consumePwQuotaOrThrow(request.accessPayload.pwName, 1);
 
     consumedQuotaAmount = 1;
+    const acceptedMessage = `请求已接收，准备提升到 ${imageOptions.imageSize}...`;
 
     await logBackend("info", "Accepted enhance stream request", {
       requestId,
@@ -2743,14 +3598,30 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       sourceImageName: sourceImage.name,
     });
 
-    writeSseEvent(response, "status", {
+    await writeRequestState(requestId, {
+      createdAt,
+      type: "enhance",
+      route: "/api/enhance/stream",
+      mode: "enhance",
+      pwName: request.accessPayload.pwName,
+      status: "accepted",
       stage: "accepted",
-      message: `请求已接收，准备提升到 ${imageOptions.imageSize}...`,
-      requestId,
+      message: acceptedMessage,
       bananaModelId: bananaModel.id,
-      imageSize: imageOptions.imageSize,
-      quota: buildPwSummary(quotaRecord),
+      imageOptions,
+      requestPayload,
     });
+
+    if (!closed) {
+      writeSseEvent(response, "status", {
+        stage: "accepted",
+        message: acceptedMessage,
+        requestId,
+        bananaModelId: bananaModel.id,
+        imageSize: imageOptions.imageSize,
+        quota: buildPwSummary(quotaRecord),
+      });
+    }
 
     const result = await generateImagesWithGemini({
       requestId,
@@ -2767,20 +3638,53 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
         "Increase visual clarity, local detail, edge fidelity, and legibility only. Do not redesign the image or change the arrangement.",
       ],
       onEvent(eventPayload) {
+        if (eventPayload?.type === "status") {
+          void persistRequestProgressState({
+            requestId,
+            createdAt,
+            type: "enhance",
+            route: "/api/enhance/stream",
+            mode: "enhance",
+            pwName: request.accessPayload.pwName,
+            bananaModelId: bananaModel.id,
+            imageOptions,
+            requestPayload,
+            eventPayload,
+          }).catch((error) => {
+            void logBackend("error", "Failed to persist enhance stream progress", {
+              requestId,
+              route: "/api/enhance/stream",
+              error,
+            });
+          });
+        }
+
         if (!closed) {
           writeSseEvent(response, eventPayload.type || "status", eventPayload);
         }
       },
     });
 
-    if (closed) {
-      return;
+    if (!closed) {
+      writeSseEvent(response, "status", {
+        stage: "saving",
+        message: "正在保存提升结果...",
+        requestId,
+      });
     }
 
-    writeSseEvent(response, "status", {
+    await writeRequestState(requestId, {
+      createdAt,
+      type: "enhance",
+      route: "/api/enhance/stream",
+      mode: "enhance",
+      pwName: request.accessPayload.pwName,
+      status: "saving",
       stage: "saving",
       message: "正在保存提升结果...",
-      requestId,
+      bananaModelId: bananaModel.id,
+      imageOptions,
+      requestPayload,
     });
 
     const savedRecord = await saveGenerationArtifacts({
@@ -2808,37 +3712,34 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       googleCloudLocation: result.googleCloudLocation,
     });
 
-    if (closed) {
-      return;
-    }
-
-    writeSseEvent(response, "result", {
-      ok: true,
-      bananaModelId: bananaModel.id,
-      bananaModelName: bananaModel.name,
-      bananaModelTone: bananaModel.tone,
-      bananaModelPriceLabel: bananaModel.priceLabel,
-      bananaModelPriceNote: bananaModel.priceNote,
-      providerModel: result.providerModel,
-      googleAuthMode: result.googleAuthMode,
-      googleBackend: result.googleBackend,
-      googleCloudProject: result.googleCloudProject,
-      googleCloudLocation: result.googleCloudLocation,
-      responseId: result.responseId,
-      aspectRatio: imageOptions.aspectRatio,
-      imageSize: imageOptions.imageSize,
-      layoutRows: imageOptions.layoutRows,
-      layoutColumns: imageOptions.layoutColumns,
-      imageCountRequested: 1,
-      imageCountReturned: 1,
-      savedRecord,
+    const resultPayload = buildStreamResultPayload({
+      mode: "enhance",
+      bananaModel,
+      imageOptions,
+      result,
       savedRecords: [savedRecord],
-      mimeType: result.images[0].mimeType,
-      imageBase64: result.images[0].imageBase64,
-      images: result.images,
-      text: result.text,
       quota: buildPwSummary(quotaRecord),
+      requestId,
     });
+
+    await writeRequestState(requestId, {
+      createdAt,
+      type: "enhance",
+      route: "/api/enhance/stream",
+      mode: "enhance",
+      pwName: request.accessPayload.pwName,
+      status: "succeeded",
+      stage: "result",
+      message: "提升完成",
+      bananaModelId: bananaModel.id,
+      imageOptions,
+      requestPayload,
+      result: buildRecoverableResultPayload(resultPayload),
+    });
+
+    if (!closed) {
+      writeSseEvent(response, "result", resultPayload);
+    }
   } catch (error) {
     if (consumedQuotaAmount > 0) {
       try {
@@ -2861,20 +3762,28 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       }
     }
 
-    if (closed && error?.name === "AbortError") {
-      await logBackend("info", "Enhance stream request aborted after client disconnect", {
-        requestId,
-        route: "/api/enhance/stream",
-      });
-    } else {
-      await logBackend("error", "Enhance stream request failed", {
-        requestId,
-        route: "/api/enhance/stream",
-        error,
-      });
-    }
+    const message = error instanceof Error ? error.message : "提升清晰度失败";
+
+    await writeRequestState(requestId, {
+      createdAt,
+      type: "enhance",
+      route: "/api/enhance/stream",
+      mode: "enhance",
+      pwName: request.accessPayload?.pwName || "",
+      status: "failed",
+      stage: "error",
+      message,
+      error: message,
+      requestPayload,
+    });
+
+    await logBackend("error", "Enhance stream request failed", {
+      requestId,
+      route: "/api/enhance/stream",
+      error,
+    });
+
     if (!closed) {
-      const message = error instanceof Error ? error.message : "提升清晰度失败";
       writeSseEvent(response, "error", { error: message });
     }
   } finally {
@@ -3061,6 +3970,10 @@ if (await hasDistIndex()) {
 
 await ensureBootstrapPwRecord();
 await logBackend("info", "Google generation backend configured", await getResolvedGoogleBackendSummary());
+await logBackend("info", "Google request queue configured", {
+  concurrency: GOOGLE_QUEUE_CONCURRENCY,
+  rateLimitCooldownMs: getGoogleRateLimitCooldownMs(),
+});
 
 const server = app.listen(port, host, () => {
   void logBackend("info", "Backend listening", {
