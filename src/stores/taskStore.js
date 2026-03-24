@@ -243,8 +243,13 @@ export const useTaskStore = create((set) => ({
           ? nextTasksOrUpdater(state.requestTasks)
           : nextTasksOrUpdater;
 
+      const normalizedTasks = (Array.isArray(nextTasks) ? nextTasks : [])
+        .map(normalizeRequestTask)
+        .filter(Boolean)
+        .slice(0, MAX_REQUEST_TASKS);
+
       return {
-        requestTasks: writeStoredRequestTasks(nextTasks),
+        requestTasks: writeStoredRequestTasks(normalizedTasks),
       };
     });
   },
@@ -279,24 +284,26 @@ export const useTaskStore = create((set) => ({
       return;
     }
 
-    set((state) => ({
-      requestTasks: writeStoredRequestTasks(
-        state.requestTasks.map((task) => {
-          if (task.requestId !== requestId) {
-            return task;
-          }
+    set((state) => {
+      const nextTasks = state.requestTasks.map((task) => {
+        if (task.requestId !== requestId) {
+          return task;
+        }
 
-          const nextPatch =
-            typeof patchValue === "function" ? patchValue(task) : patchValue;
+        const nextPatch =
+          typeof patchValue === "function" ? patchValue(task) : patchValue;
 
-          return normalizeRequestTask({
-            ...task,
-            ...nextPatch,
-            updatedAt: new Date().toISOString(),
-          });
-        }),
-      ),
-    }));
+        return normalizeRequestTask({
+          ...task,
+          ...nextPatch,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+
+      return {
+        requestTasks: writeStoredRequestTasks(nextTasks),
+      };
+    });
   },
   startRetryingRequestTask(requestId) {
     if (!requestId) {
@@ -334,10 +341,10 @@ export const useTaskStore = create((set) => ({
         requestTaskRetryHandlers.delete(requestId);
       });
 
+      const nextTasks = state.requestTasks.filter((task) => !isRequestTaskTerminal(task));
+
       return {
-        requestTasks: writeStoredRequestTasks(
-          state.requestTasks.filter((task) => !isRequestTaskTerminal(task)),
-        ),
+        requestTasks: writeStoredRequestTasks(nextTasks),
       };
     });
   },

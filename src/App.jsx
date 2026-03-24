@@ -4335,25 +4335,30 @@ function BananaStudioApp({ routeMode = "login" }) {
       "全局提示词与画风参考图",
       normalizeTextValue(professionalGlobalPrompt) || "未填写",
       "",
-      "分镜提示词",
+      "分镜提示词与配文",
     ];
     const cellSections = storyboardCellList
       .map((cell) => {
         const prompt = normalizeTextValue(cell.prompt);
+        const caption = normalizeTextValue(cell.caption);
 
-        if (!prompt) {
+        if (!prompt && !caption) {
           return "";
         }
 
         return [
           `${cell.label}｜行 ${cell.row} / 列 ${cell.column}`,
-          `提示词：${prompt}`,
+          `提示词：${prompt || "未填写"}`,
+          `配文：${caption || "未填写"}`,
           `格子参考图：${cell.referenceImages?.[0]?.name || "未设置"}`,
         ].join("\n");
       })
       .filter(Boolean);
 
-    return [...shareSections, ...(cellSections.length > 0 ? cellSections : ["未填写任何格子提示词"])]
+    return [
+      ...shareSections,
+      ...(cellSections.length > 0 ? cellSections : ["未填写任何格子提示词或配文"]),
+    ]
       .join("\n\n")
       .trim();
   }, [

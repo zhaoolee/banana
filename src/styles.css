@@ -1664,6 +1664,7 @@ textarea:focus {
   max-height: calc(100dvh - 40px);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
+  min-width: 0;
   isolation: isolate;
   border: 1px solid rgba(79, 54, 7, 0.12);
   border-radius: 24px;
@@ -1690,9 +1691,12 @@ textarea:focus {
 }
 
 .storyboard-editor-windowbar strong {
+  min-width: 0;
   text-align: center;
   font-size: 0.9rem;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .storyboard-editor-nav-button {
@@ -1707,6 +1711,7 @@ textarea:focus {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   gap: 14px;
   padding: 10px 16px 16px;
@@ -1724,6 +1729,7 @@ textarea:focus {
 .storyboard-editor-form {
   display: grid;
   align-content: start;
+  min-width: 0;
   gap: 10px;
 }
 
@@ -1802,11 +1808,13 @@ textarea:focus {
 
 .storyboard-reference-panel {
   display: grid;
+  min-width: 0;
   gap: 8px;
 }
 
 .storyboard-editor-asset-panel {
   display: grid;
+  min-width: 0;
   gap: 10px;
   padding: 12px;
   border: 1px solid rgba(79, 54, 7, 0.08);
@@ -1817,6 +1825,7 @@ textarea:focus {
 .storyboard-editor-selected-asset-card {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr);
+  min-width: 0;
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -1864,6 +1873,7 @@ textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   flex-wrap: wrap;
 }
 
@@ -1894,6 +1904,7 @@ textarea:focus {
 
 .storyboard-caption-field {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -1902,6 +1913,7 @@ textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .storyboard-caption-field-hint {
@@ -1911,6 +1923,8 @@ textarea:focus {
 }
 
 .storyboard-caption-textarea {
+  width: 100%;
+  max-width: 100%;
   min-height: calc(2 * 1.45em + 28px);
   max-height: calc(6 * 1.45em + 28px);
   padding: 14px 16px;
@@ -1928,6 +1942,8 @@ textarea:focus {
 }
 
 .storyboard-editor-prompt-textarea {
+  width: 100%;
+  max-width: 100%;
   padding: 14px 16px;
   border-radius: 18px;
   font-size: 0.94rem;
@@ -1949,12 +1965,14 @@ textarea:focus {
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
+  min-width: 0;
   flex-wrap: wrap;
 }
 
 .storyboard-editor-preview-card {
   display: grid;
   align-content: start;
+  min-width: 0;
   gap: 8px;
 }
 
@@ -1984,6 +2002,9 @@ textarea:focus {
 
 .storyboard-editor-preview-button {
   position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
   border: 1px solid rgba(79, 54, 7, 0.12);
   border-radius: 18px;
   padding: 0;
@@ -2033,6 +2054,7 @@ textarea:focus {
 
 .storyboard-editor-preview-meta {
   display: grid;
+  min-width: 0;
   gap: 4px;
 }
 
@@ -2040,6 +2062,8 @@ textarea:focus {
   color: var(--muted);
   font-size: 0.84rem;
   font-weight: 700;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .storyboard-editor-library-button {
@@ -2066,6 +2090,7 @@ textarea:focus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  min-width: 0;
   max-height: 260px;
   padding: 4px 2px 2px;
   overflow: auto;
@@ -2073,6 +2098,7 @@ textarea:focus {
 
 .storyboard-library-item {
   display: grid;
+  min-width: 0;
   gap: 10px;
   padding: 10px;
   border: 1px solid rgba(79, 54, 7, 0.12);
@@ -4646,6 +4672,8 @@ textarea {
   }
 
   .storyboard-editor-panel {
+    width: 100%;
+    max-width: 100%;
     max-height: calc(100dvh - 24px);
     border-radius: 24px;
   }
@@ -4714,20 +4742,27 @@ textarea {
   }
 
   .storyboard-editor-layout {
-    padding: 10px 16px 16px;
+    gap: 12px;
+    padding: 10px 12px 12px;
   }
 
   .storyboard-editor-footer {
-    padding: 0 16px 16px;
+    padding: 0 12px 12px;
+  }
+
+  .storyboard-editor-mode-row {
+    padding: 12px 12px 0;
   }
 
   .storyboard-editor-windowbar {
-    padding: 12px 14px;
-  }
-
-  .storyboard-editor-windowbar {
-    grid-template-columns: 32px minmax(0, 1fr) 32px;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .storyboard-editor-windowbar-spacer {
+    display: none;
   }
 
   .storyboard-editor-pager {
@@ -4748,7 +4783,65 @@ textarea {
   .storyboard-editor-windowbar strong {
     font-size: 0.96rem;
     line-height: 1.4;
+    text-align: left;
+  }
+
+  .storyboard-reference-panel-header,
+  .storyboard-caption-field-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .storyboard-reference-parent-hint {
+    width: 100%;
+    justify-content: center;
+    white-space: normal;
     text-align: center;
+  }
+
+  .storyboard-reference-card,
+  .storyboard-editor-selected-asset-card {
+    grid-template-columns: 64px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .storyboard-reference-card {
+    grid-template-areas:
+      "media copy"
+      "actions actions";
+  }
+
+  .storyboard-reference-card .professional-style-reference-media {
+    grid-area: media;
+  }
+
+  .storyboard-reference-card .professional-style-reference-copy {
+    grid-area: copy;
+  }
+
+  .storyboard-reference-card .professional-style-reference-actions {
+    grid-area: actions;
+    justify-self: stretch;
+    justify-content: flex-end;
+  }
+
+  .storyboard-library-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .storyboard-editor-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .storyboard-editor-actions > button {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .storyboard-clear-button {
+    margin-left: 0;
   }
 
   .reference-grid {
