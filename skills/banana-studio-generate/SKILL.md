@@ -11,13 +11,17 @@ Use this skill when you need to generate images through the Banana Studio backen
 
 - Sends `pw` directly on backend requests
 - Uses the same direct `pw` auth path as the Studio frontend, via `x-banana-pw`
-- Calls `POST /api/generate/stream` with the same request shape as the frontend
+- Uses the same frontend route selection as the Studio UI:
+  - prompt-only / simple-style requests default to `POST /api/generate/simple/stream`
+  - requests with layout guide or explicit layout rows / columns use `POST /api/generate/professional/stream`
+  - automatically falls back to `POST /api/generate/stream` on older backends
 - Supports prompt-only runs
 - Supports the same request fields the frontend sends:
   - `prompt`
   - `modelId`
   - `imageOptions.aspectRatio`
   - `imageOptions.imageSize`
+  - `imageOptions.imageCount`
   - `imageOptions.layoutRows`
   - `imageOptions.layoutColumns`
   - `layoutGuideImage`
@@ -63,6 +67,7 @@ node /absolute/path/to/banana_studio_generate.mjs \
   --model-id "nano-banana-2" \
   --aspect-ratio "1:8" \
   --image-size "2K" \
+  --image-count 2 \
   --layout-rows 7 \
   --layout-columns 1
 ```
@@ -86,7 +91,7 @@ node /absolute/path/to/banana_studio_generate.mjs \
   --payload-file /abs/path/payload.json
 ```
 
-`payload.json` can contain the same JSON shape the frontend posts to `/api/generate/stream`.
+`payload.json` can contain the same JSON shape the frontend posts to the generate SSE endpoints.
 
 ## Output
 
@@ -100,6 +105,6 @@ The script:
 ## Notes
 
 - If `--pw` is omitted, the script reads `BANANA_STUDIO_PW`.
-- If `--api-base-url` is omitted, the script reads `BANANA_STUDIO_API_BASE_URL` and falls back to `http://127.0.0.1:3001`.
-- The script defaults to `modelId: "nano-banana-2"` and frontend-like image defaults when you do not provide them.
+- If `--api-base-url` is omitted, the script reads `BANANA_STUDIO_API_BASE_URL` and falls back to `http://127.0.0.1:23001`.
+- The script defaults to simple-mode-like prompt-only settings when you do not provide them: `modelId: "nano-banana-2"`, `imageOptions.imageSize: "1K"`, `imageOptions.imageCount: 2`. It only adds `aspectRatio`, `layoutRows`, and `layoutColumns` when you pass them explicitly or include them in `--payload-file`.
 - When Codex uses this skill, resolve `scripts/banana_studio_generate.mjs` relative to the skill directory instead of assuming a repo-local `skills/` folder.

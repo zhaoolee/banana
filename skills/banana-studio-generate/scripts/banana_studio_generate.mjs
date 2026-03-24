@@ -7,10 +7,8 @@ import path from "node:path";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:23001";
 const DEFAULT_MODEL_ID = "nano-banana-2";
 const DEFAULT_IMAGE_OPTIONS = {
-  aspectRatio: "1:1",
   imageSize: "1K",
-  layoutRows: 1,
-  layoutColumns: 1,
+  imageCount: 2,
 };
 
 function printUsage() {
@@ -25,6 +23,7 @@ Options:
   --model-id <id>             Banana Studio model id.
   --aspect-ratio <ratio>      Example: 1:1, 1:8, 16:9.
   --image-size <size>         1K, 2K, or 4K.
+  --image-count <number>      Output image count.
   --layout-rows <number>      Layout rows.
   --layout-columns <number>   Layout columns.
   --reference-image <path>    Repeatable local image file path.
@@ -92,6 +91,9 @@ function parseArgs(argv) {
         break;
       case "--image-size":
         options.imageSize = nextValue;
+        break;
+      case "--image-count":
+        options.imageCount = Number.parseInt(nextValue, 10);
         break;
       case "--layout-rows":
         options.layoutRows = Number.parseInt(nextValue, 10);
@@ -204,6 +206,9 @@ async function buildPayload(options) {
   if (options.imageSize) {
     payload.imageOptions.imageSize = options.imageSize;
   }
+  if (Number.isInteger(options.imageCount)) {
+    payload.imageOptions.imageCount = options.imageCount;
+  }
   if (Number.isInteger(options.layoutRows)) {
     payload.imageOptions.layoutRows = options.layoutRows;
   }
@@ -238,6 +243,43 @@ function logStatus(message, quiet) {
   if (!quiet && message) {
     process.stderr.write(`${message}\n`);
   }
+}
+
+function buildHttpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function buildNestedErrorMessage(error) {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const causeMessage =
+    error.cause instanceof Error
+      ? buildNestedErrorMessage(error.cause)
+      : error.cause
+        ? String(error.cause)
+        : "";
+
+  return causeMessage && causeMessage !== error.message
+    ? `${error.message}\nCaused by: ${causeMessage}`
+    : error.message;
+}
+
+function resolveGenerateRoute(payload) {
+  const imageOptions = payload?.imageOptions && typeof payload.imageOptions === "object"
+    ? payload.imageOptions
+    : {};
+  const hasExplicitLayoutRows = Object.prototype.hasOwnProperty.call(imageOptions, "layoutRows");
+  const hasExplicitLayoutColumns = Object.prototype.hasOwnProperty.call(imageOptions, "layoutColumns");
+
+  if (payload?.layoutGuideImage || hasExplicitLayoutRows || hasExplicitLayoutColumns) {
+    return "/api/generate/professional/stream";
+  }
+
+  return "/api/generate/simple/stream";
 }
 
 function consumeSseBlocks(buffer, flush = false) {
@@ -293,20 +335,31 @@ function parseSseBlock(block) {
   };
 }
 
-async function requestGenerateStream({ apiBaseUrl, pw, payload, quiet }) {
-  const response = await fetch(`${apiBaseUrl}/api/generate/stream`, {
-    method: "POST",
-    headers: {
-      ...buildPwHeaders(pw),
-      "content-type": "application/json",
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify(payload),
-  });
+async function requestGenerateStreamWithRoute({ apiBaseUrl, route, pw, payload, quiet }) {
+  let response;
+
+  try {
+    response = await fetch(`${apiBaseUrl}${route}`, {
+      method: "POST",
+      headers: {
+        ...buildPwHeaders(pw),
+        "content-type": "application/json",
+        accept: "text/event-stream",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    throw new Error(`Request to ${route} failed`, {
+      cause: error,
+    });
+  }
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => "");
-    throw new Error(text || `Generate stream failed with HTTP ${response.status}`);
+    throw buildHttpError(
+      text || `Generate stream failed with HTTP ${response.status}`,
+      response.status,
+    );
   }
 
   const reader = response.body.getReader();
@@ -364,6 +417,32 @@ async function requestGenerateStream({ apiBaseUrl, pw, payload, quiet }) {
   }
 
   return finalResult;
+}
+
+async function requestGenerateStream({ apiBaseUrl, pw, payload, quiet }) {
+  const route = resolveGenerateRoute(payload);
+
+  try {
+    return await requestGenerateStreamWithRoute({
+      apiBaseUrl,
+      route,
+      pw,
+      payload,
+      quiet,
+    });
+  } catch (error) {
+    if (error?.status !== 404 && error?.status !== 405) {
+      throw error;
+    }
+
+    return requestGenerateStreamWithRoute({
+      apiBaseUrl,
+      route: "/api/generate/stream",
+      pw,
+      payload,
+      quiet,
+    });
+  }
 }
 
 function inferExtensionFromMimeType(mimeType) {
@@ -472,6 +551,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${buildNestedErrorMessage(error)}\n`);
   process.exitCode = 1;
 });
