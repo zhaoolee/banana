@@ -2227,6 +2227,66 @@ async function requestProfessionalExportPreview(password, payload) {
   };
 }
 
+async function saveBlobFile(blob, filename) {
+  if (
+    typeof window === "undefined" ||
+    typeof document === "undefined" ||
+    typeof URL === "undefined"
+  ) {
+    throw new Error("当前环境不支持导出文件");
+  }
+
+  const isCoarsePointer = window.matchMedia?.("(pointer: coarse)").matches;
+  const objectUrl = URL.createObjectURL(blob);
+
+  try {
+    if (
+      isCoarsePointer &&
+      typeof navigator !== "undefined" &&
+      typeof File !== "undefined" &&
+      navigator.share
+    ) {
+      const file = new File([blob], filename, {
+        type: blob.type || "application/octet-stream",
+      });
+
+      if (navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: filename,
+          });
+          return;
+        } catch (error) {
+          if (error?.name === "AbortError") {
+            return;
+          }
+
+          console.warn("Share failed, falling back to download.", error);
+        }
+      }
+    }
+
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.rel = "noopener";
+    anchor.style.display = "none";
+
+    if (isCoarsePointer) {
+      anchor.target = "_blank";
+      anchor.download = "";
+    } else {
+      anchor.download = filename;
+    }
+
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  }
+}
+
 function downloadTextFile(filename, text, mimeType = "application/json") {
   if (typeof document === "undefined") {
     throw new Error("当前环境不支持下载文件");
@@ -5181,22 +5241,14 @@ function BananaStudioApp({ routeMode = "login" }) {
         }),
       );
 
-      if (typeof document !== "undefined") {
-        const downloadUrl = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = downloadUrl;
-        anchor.download =
-          filename ||
+      await saveBlobFile(
+        blob,
+        filename ||
           buildDownloadNameWithOptions({
             mimeType: "image/png",
             suffix: "professional-export",
-          });
-        anchor.style.display = "none";
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-      }
+          }),
+      );
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "导出预览失败");
     } finally {

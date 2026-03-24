@@ -591,6 +591,10 @@ textarea:focus {
   align-items: start;
 }
 
+.studio-layout > * {
+  min-width: 0;
+}
+
 .studio-layout.is-professional-layout {
   grid-template-columns: 1.15fr 1fr;
 }
@@ -664,6 +668,11 @@ textarea:focus {
 .layout-config-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
+}
+
+.layout-config-card > * {
+  min-width: 0;
 }
 
 .canvas-custom-size-row {
@@ -682,6 +691,7 @@ textarea:focus {
   padding: 12px;
   border: 1px solid rgba(79, 54, 7, 0.08);
   background: rgba(255, 251, 240, 0.56);
+  min-width: 0;
 }
 
 .professional-global-prompt-textarea {
@@ -699,6 +709,7 @@ textarea:focus {
 .professional-style-reference-panel {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .professional-style-upload {
@@ -714,6 +725,7 @@ textarea:focus {
   padding: 6px;
   border: 1px solid rgba(79, 54, 7, 0.1);
   background: rgba(255, 252, 243, 0.84);
+  min-width: 0;
 }
 
 .professional-style-reference-media {
@@ -759,6 +771,7 @@ textarea:focus {
   gap: 4px;
   align-content: start;
   justify-self: end;
+  min-width: 0;
 }
 
 .professional-style-reference-action {
@@ -804,8 +817,9 @@ textarea:focus {
 }
 
 .canvas-size-full-row-field {
-  flex: 1 1 100%;
-  min-width: 100%;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
 }
 
 .scenario-select-header {
@@ -819,6 +833,7 @@ textarea:focus {
   display: flex;
   align-items: stretch;
   gap: 10px;
+  min-width: 0;
 }
 
 .scenario-select-row .model-selector {
@@ -1029,6 +1044,7 @@ textarea:focus {
   flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 12px;
+  min-width: 0;
 }
 
 .layout-preview-toolbar-actions {
@@ -1037,6 +1053,7 @@ textarea:focus {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
 }
 
 .storyboard-share-button,
@@ -2542,6 +2559,11 @@ textarea:focus {
 .prompt-form {
   display: grid;
   gap: 14px;
+  min-width: 0;
+}
+
+.prompt-form > * {
+  min-width: 0;
 }
 
 .prompt-form.is-simple-panel {
@@ -4540,10 +4562,28 @@ textarea {
   }
 
   .professional-style-reference-card {
-    grid-template-columns: 76px minmax(0, 1fr) auto;
+    grid-template-columns: 72px minmax(0, 1fr);
+    grid-template-areas:
+      "media copy"
+      "actions actions";
     gap: 10px;
     padding: 10px;
     align-items: start;
+  }
+
+  .professional-style-reference-media {
+    grid-area: media;
+  }
+
+  .professional-style-reference-copy {
+    grid-area: copy;
+  }
+
+  .professional-style-reference-actions {
+    grid-area: actions;
+    justify-self: stretch;
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .layout-select-field {
@@ -4636,14 +4676,26 @@ textarea {
   }
 
   .professional-storyboard-disclosure .storyboard-style-toggle {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    padding: 8px 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 6px 10px;
+    padding: 12px;
   }
 
   .professional-storyboard-disclosure .storyboard-style-toggle-meta {
-    grid-column: auto;
-    white-space: nowrap;
-    text-align: right;
+    grid-column: 1 / -1;
+    white-space: normal;
+    text-align: left;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .professional-storyboard-disclosure .storyboard-style-toggle-icon {
+    grid-column: 2 / 3;
+    grid-row: 1 / 2;
+    align-self: center;
+    justify-self: end;
+    margin-top: 2px;
   }
 
   .compact-range-field {
