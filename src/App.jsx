@@ -195,6 +195,7 @@ const CANVAS_SIZE_OPTIONS = [
     layoutColumns: 1,
   },
 ];
+const REQUEST_TASK_RECOVERY_STALE_AFTER_MS = 4 * 60 * 1000;
 const SUPPORTED_ASPECT_RATIO_VALUES = new Set(ASPECT_RATIO_OPTIONS.map((option) => option.value));
 const SUPPORTED_CANVAS_SIZE_VALUES = new Set(CANVAS_SIZE_OPTIONS.map((option) => option.value));
 const IMAGE_SIZE_OPTIONS = [
@@ -1464,6 +1465,42 @@ function buildOrphanedRequestTaskPatch(task) {
     queueRateLimitWaitMs: 0,
     queueRateLimitedUntil: "",
   };
+}
+
+function buildMissingRecoverableRequestTaskPatch(
+  task,
+  message = "后端已找不到这个任务，已视为结束，请重新生成",
+) {
+  return {
+    status: "failed",
+    stage: "error",
+    message,
+    error: message,
+    canRetry: task?.canRetry !== false,
+    queuePosition: 0,
+    queueActiveCount: 0,
+    queuePendingCount: 0,
+    queueConcurrency: 0,
+    queueRateLimitWaitMs: 0,
+    queueRateLimitedUntil: "",
+  };
+}
+
+function isRequestTaskRecoveryStale(task, referenceValue = "") {
+  if (isRequestTaskTerminal(task)) {
+    return false;
+  }
+
+  const latestUpdateMs =
+    parseRequestTaskTimeMs(referenceValue) ||
+    parseRequestTaskTimeMs(task?.updatedAt) ||
+    parseRequestTaskTimeMs(task?.createdAt);
+
+  if (!latestUpdateMs) {
+    return false;
+  }
+
+  return Date.now() - latestUpdateMs >= REQUEST_TASK_RECOVERY_STALE_AFTER_MS;
 }
 
 function buildGalleryDateKey(value) {
@@ -3958,6 +3995,21 @@ function BananaStudioApp({ routeMode = "login" }) {
         };
       }
 
+      if (isRequestTaskRecoveryStale(requestTask, data?.updatedAt)) {
+        const staleTaskPatch = buildMissingRecoverableRequestTaskPatch(
+          requestTask,
+          "任务状态长时间未更新，后端可能已丢失该任务，请重新生成",
+        );
+        updateRequestTask(requestTask.requestId, staleTaskPatch);
+        setStudioNotice("");
+        setStudioError(staleTaskPatch.error);
+
+        return {
+          state: "failed",
+          data,
+        };
+      }
+
       updateRequestTask(requestTask.requestId, {
         status: normalizeRequestTaskProgress(data)?.status || "processing",
         stage: data?.stage || "accepted",
@@ -6379,6 +6431,16 @@ function BananaStudioApp({ routeMode = "login" }) {
       setStudioNotice(cancelledMessage);
       closeRequestTaskCancelConfirm();
     } catch (error) {
+      if (error?.status === 404) {
+        const missingTaskPatch = buildMissingRecoverableRequestTaskPatch(targetTask);
+        updateRequestTask(requestId, missingTaskPatch);
+        abortRequestAbortController(requestId, createRequestCancelledError());
+        setStudioNotice("");
+        setStudioError(missingTaskPatch.error);
+        closeRequestTaskCancelConfirm();
+        return;
+      }
+
       if (error?.status === 409 && normalizeTextValue(error?.message) === "任务已经取消") {
         const cancelledMessage = "任务已取消";
         updateRequestTask(requestId, buildCancelledRequestTaskPatch(cancelledMessage));
@@ -6387,6 +6449,24 @@ function BananaStudioApp({ routeMode = "login" }) {
         setStudioNotice(cancelledMessage);
         closeRequestTaskCancelConfirm();
         return;
+      }
+
+      if (error?.status === 409) {
+        try {
+          const recoveryOutcome = await recoverRequestTaskFromServer(targetTask);
+
+          if (
+            recoveryOutcome.state === "recovered" ||
+            recoveryOutcome.state === "failed" ||
+            recoveryOutcome.state === "cancelled" ||
+            recoveryOutcome.state === "missing"
+          ) {
+            closeRequestTaskCancelConfirm();
+            return;
+          }
+        } catch {
+          // Fall through to the generic error below.
+        }
       }
 
       setStudioError(error instanceof Error ? error.message : "取消任务失败");
