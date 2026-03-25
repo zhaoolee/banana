@@ -352,8 +352,10 @@ async function runProfessionalSceneTransferSmoke(browser, baseURL) {
       await page.locator(".storyboard-editor-preview-button img").waitFor();
       await page.getByRole("button", { name: "关闭输入面板" }).click();
 
+      await page.getByRole("button", { name: "导出场景" }).click();
+      await page.getByRole("dialog", { name: "导出 JSON 配置" }).waitFor();
       const downloadPromise = page.waitForEvent("download");
-      await page.getByRole("button", { name: "导出" }).click();
+      await page.getByRole("button", { name: "下载 JSON" }).click();
       const download = await downloadPromise;
       const downloadFailure = await download.failure();
 

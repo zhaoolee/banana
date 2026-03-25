@@ -15,7 +15,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import localforage from "localforage";
 import AdminApp from "./AdminApp.jsx";
 import {
@@ -72,6 +72,7 @@ const REFERENCE_IMAGE_JPEG_QUALITY_STEPS = [0.82, 0.76, 0.7, 0.64, 0.58];
 const REFERENCE_IMAGE_RESIZE_STEPS = [1, 0.9, 0.82, 0.74];
 const PROMPT_TEXTAREA_MIN_ROWS = 2;
 const PROMPT_TEXTAREA_MAX_ROWS = 5;
+const PROMPT_STORAGE_WRITE_DEBOUNCE_MS = 180;
 const PANEL_MODE_SIMPLE = "simple";
 const PANEL_MODE_PROFESSIONAL = "professional";
 const CUSTOM_CANVAS_SIZE_VALUE = "custom";
@@ -838,7 +839,7 @@ function resolveStoryboardCollisionDetection(args) {
   return closestCenter(args);
 }
 
-function StoryboardCellContent({ cell }) {
+const StoryboardCellContent = memo(function StoryboardCellContent({ cell }) {
   return (
     <>
       {cell.record ? (
@@ -871,14 +872,17 @@ function StoryboardCellContent({ cell }) {
       ) : null}
     </>
   );
+}, areStoryboardCellContentPropsEqual);
+
+function areStoryboardCellContentPropsEqual(previousProps, nextProps) {
+  return previousProps.cell === nextProps.cell;
 }
 
-function SortableStoryboardCell({
+const SortableStoryboardCell = memo(function SortableStoryboardCell({
   cell,
   dragDisabled = false,
   dragHandleOnly = false,
-  onOpen,
-  onClear,
+  interactionRef,
 }) {
   const {
     attributes,
@@ -918,7 +922,7 @@ function SortableStoryboardCell({
           isDragging,
           isDropTarget: isOver && !isDragging,
         })}
-        onClick={() => onOpen(cell.id)}
+        onClick={() => interactionRef.current.open(cell.id)}
         aria-label={`${cell.label}${dragHandleOnly ? "，点击打开编辑，拖拽请使用排序手柄" : dragDisabled ? "，生成中暂不可拖拽" : "，可拖拽调整顺序"}${cell.status === "loading" ? "，生成中" : ""}`}
         aria-roledescription={dragHandleOnly ? "分镜格" : "可拖拽分镜格"}
         ref={dragHandleOnly ? undefined : setActivatorNodeRef}
@@ -952,7 +956,7 @@ function SortableStoryboardCell({
           className="storyboard-cell-clear-button"
           onClick={(event) => {
             event.stopPropagation();
-            onClear(cell.id);
+            interactionRef.current.clear(cell.id);
           }}
           onPointerDown={(event) => event.stopPropagation()}
           onTouchStart={(event) => event.stopPropagation()}
@@ -971,6 +975,108 @@ function SortableStoryboardCell({
       ) : null}
     </div>
   );
+}, areSortableStoryboardCellPropsEqual);
+
+function areSortableStoryboardCellPropsEqual(previousProps, nextProps) {
+  return previousProps.cell === nextProps.cell &&
+    previousProps.dragDisabled === nextProps.dragDisabled &&
+    previousProps.dragHandleOnly === nextProps.dragHandleOnly &&
+    previousProps.interactionRef === nextProps.interactionRef;
+}
+
+const ProfessionalStoryboardGridSection = memo(function ProfessionalStoryboardGridSection({
+  clearButtonDisabled = false,
+  actionRef,
+  storyboardShellStyle,
+  storyboardDragSensors,
+  storyboardGridStyle,
+  isSorting = false,
+  storyboardSortableIds,
+  storyboardCellList,
+  isMobilePerformanceMode = false,
+  interactionRef,
+  activeStoryboardDragCell,
+}) {
+  return (
+    <>
+      <div className="layout-preview-toolbar">
+        <div className="section-title-inline">
+          <strong>分镜表格</strong>
+          <span>刷新后会自动恢复已填写内容和已生成图片。</span>
+        </div>
+        <div className="layout-preview-toolbar-actions">
+          <button
+            type="button"
+            className="ghost-button storyboard-clear-button"
+            onClick={() => actionRef.current.openClearConfirm()}
+            disabled={clearButtonDisabled}
+          >
+            清空表格
+          </button>
+        </div>
+      </div>
+
+      <div className="layout-preview-shell">
+        <div className="layout-preview-square" style={storyboardShellStyle}>
+          <DndContext
+            sensors={storyboardDragSensors}
+            collisionDetection={resolveStoryboardCollisionDetection}
+            onDragStart={(event) => actionRef.current.onDragStart(event)}
+            onDragCancel={() => actionRef.current.onDragCancel()}
+            onDragEnd={(event) => actionRef.current.onDragEnd(event)}
+          >
+            <SortableContext
+              items={storyboardSortableIds}
+              strategy={rectSwappingStrategy}
+            >
+              <div
+                className={`storyboard-grid${isSorting ? " is-sorting" : ""}`}
+                style={storyboardGridStyle}
+                role="grid"
+                aria-label="专业模式分镜表格，可拖拽调整格子顺序"
+              >
+                {storyboardCellList.map((cell) => (
+                  <SortableStoryboardCell
+                    key={cell.id}
+                    cell={cell}
+                    dragDisabled={cell.status === "loading"}
+                    dragHandleOnly={isMobilePerformanceMode}
+                    interactionRef={interactionRef}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+            <DragOverlay dropAnimation={null}>
+              {activeStoryboardDragCell ? (
+                <div
+                  className={buildStoryboardCellClassName(activeStoryboardDragCell, {
+                    isOverlay: true,
+                  })}
+                  aria-hidden="true"
+                >
+                  <StoryboardCellContent cell={activeStoryboardDragCell} />
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
+        </div>
+      </div>
+    </>
+  );
+}, areProfessionalStoryboardGridSectionPropsEqual);
+
+function areProfessionalStoryboardGridSectionPropsEqual(previousProps, nextProps) {
+  return previousProps.clearButtonDisabled === nextProps.clearButtonDisabled &&
+    previousProps.actionRef === nextProps.actionRef &&
+    previousProps.storyboardShellStyle === nextProps.storyboardShellStyle &&
+    previousProps.storyboardDragSensors === nextProps.storyboardDragSensors &&
+    previousProps.storyboardGridStyle === nextProps.storyboardGridStyle &&
+    previousProps.isSorting === nextProps.isSorting &&
+    previousProps.storyboardSortableIds === nextProps.storyboardSortableIds &&
+    previousProps.storyboardCellList === nextProps.storyboardCellList &&
+    previousProps.isMobilePerformanceMode === nextProps.isMobilePerformanceMode &&
+    previousProps.interactionRef === nextProps.interactionRef &&
+    previousProps.activeStoryboardDragCell === nextProps.activeStoryboardDragCell;
 }
 
 function parseAspectRatio(value) {
@@ -3692,6 +3798,18 @@ function BananaStudioApp({ routeMode = "login" }) {
     cellId: "",
     timestamp: 0,
   });
+  const storyboardCellsRef = useRef(storyboardCells);
+  const activeStoryboardDragIdRef = useRef(activeStoryboardDragId);
+  const storyboardCellInteractionRef = useRef({
+    open: () => {},
+    clear: () => {},
+  });
+  const storyboardGridActionRef = useRef({
+    openClearConfirm: () => {},
+    onDragStart: () => {},
+    onDragCancel: () => {},
+    onDragEnd: () => {},
+  });
   const storyboardShareCopyResetTimeoutRef = useRef(null);
   const storyboardLibraryPickerTimeoutRef = useRef(null);
   const generationLibraryLoadPromiseRef = useRef(null);
@@ -3708,6 +3826,8 @@ function BananaStudioApp({ routeMode = "login" }) {
   const imagePreviewPointersRef = useRef(new Map());
   const imagePreviewPanRef = useRef(null);
   const imagePreviewPinchRef = useRef(null);
+  storyboardCellsRef.current = storyboardCells;
+  activeStoryboardDragIdRef.current = activeStoryboardDragId;
   const hasLayoutValues = Boolean(
     professionalCanvasSize &&
       professionalLayoutRows > 0 &&
@@ -5041,7 +5161,17 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [professionalSelectedModelId]);
 
   useEffect(() => {
-    writeLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY, professionalGlobalPrompt);
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      writeLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY, professionalGlobalPrompt);
+    }, PROMPT_STORAGE_WRITE_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [professionalGlobalPrompt]);
 
   useEffect(() => {
@@ -5168,7 +5298,17 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [professionalSelectedImageCount]);
 
   useEffect(() => {
-    writeLocalValue(SIMPLE_PROMPT_STORAGE_KEY, simplePrompt);
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      writeLocalValue(SIMPLE_PROMPT_STORAGE_KEY, simplePrompt);
+    }, PROMPT_STORAGE_WRITE_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [simplePrompt]);
 
   useEffect(() => {
@@ -6689,7 +6829,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function openStoryboardEditor(cellId) {
-    const cell = storyboardCells[cellId];
+    const cell = storyboardCellsRef.current[cellId];
 
     if (!cell) {
       return;
@@ -6747,8 +6887,10 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function handleStoryboardDragCancel() {
-    if (activeStoryboardDragId) {
-      suppressStoryboardCellOpen(activeStoryboardDragId);
+    const activeId = activeStoryboardDragIdRef.current;
+
+    if (activeId) {
+      suppressStoryboardCellOpen(activeId);
     }
 
     setActiveStoryboardDragId("");
@@ -6804,7 +6946,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function openStoryboardCellClearConfirm(cellId) {
-    const cell = storyboardCells[cellId];
+    const cell = storyboardCellsRef.current[cellId];
 
     if (!cell || cell.status === "loading" || !doesStoryboardCellHaveContent(cell)) {
       return;
@@ -6812,6 +6954,13 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setStoryboardCellClearConfirmCellId(cellId);
   }
+
+  storyboardCellInteractionRef.current.open = handleStoryboardCellOpen;
+  storyboardCellInteractionRef.current.clear = openStoryboardCellClearConfirm;
+  storyboardGridActionRef.current.openClearConfirm = openStoryboardClearConfirm;
+  storyboardGridActionRef.current.onDragStart = handleStoryboardDragStart;
+  storyboardGridActionRef.current.onDragCancel = handleStoryboardDragCancel;
+  storyboardGridActionRef.current.onDragEnd = handleStoryboardDragEnd;
 
   function closeStoryboardCellClearConfirm() {
     setStoryboardCellClearConfirmCellId("");
@@ -8843,69 +8992,19 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </div>
                   </div>
 
-                  <div className="layout-preview-toolbar">
-                    <div className="section-title-inline">
-                      <strong>分镜表格</strong>
-                      <span>刷新后会自动恢复已填写内容和已生成图片。</span>
-                    </div>
-                    <div className="layout-preview-toolbar-actions">
-                      <button
-                        type="button"
-                        className="ghost-button storyboard-clear-button"
-                        onClick={openStoryboardClearConfirm}
-                        disabled={!storyboardHasContent || storyboardHasLoadingCells}
-                      >
-                        清空表格
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="layout-preview-shell">
-                    <div className="layout-preview-square" style={storyboardShellStyle}>
-                      <DndContext
-                        sensors={storyboardDragSensors}
-                        collisionDetection={resolveStoryboardCollisionDetection}
-                        onDragStart={handleStoryboardDragStart}
-                        onDragCancel={handleStoryboardDragCancel}
-                        onDragEnd={handleStoryboardDragEnd}
-                      >
-                        <SortableContext
-                          items={storyboardSortableIds}
-                          strategy={rectSwappingStrategy}
-                        >
-                          <div
-                            className={`storyboard-grid${activeStoryboardDragId ? " is-sorting" : ""}`}
-                            style={storyboardGridStyle}
-                            role="grid"
-                            aria-label="专业模式分镜表格，可拖拽调整格子顺序"
-                          >
-                            {storyboardCellList.map((cell) => (
-                              <SortableStoryboardCell
-                                key={cell.id}
-                                cell={cell}
-                                dragDisabled={cell.status === "loading"}
-                                dragHandleOnly={isMobilePerformanceMode}
-                                onOpen={handleStoryboardCellOpen}
-                                onClear={openStoryboardCellClearConfirm}
-                              />
-                            ))}
-                          </div>
-                        </SortableContext>
-                        <DragOverlay dropAnimation={null}>
-                          {activeStoryboardDragCell ? (
-                            <div
-                              className={buildStoryboardCellClassName(activeStoryboardDragCell, {
-                                isOverlay: true,
-                              })}
-                              aria-hidden="true"
-                            >
-                              <StoryboardCellContent cell={activeStoryboardDragCell} />
-                            </div>
-                          ) : null}
-                        </DragOverlay>
-                      </DndContext>
-                    </div>
-                  </div>
+                  <ProfessionalStoryboardGridSection
+                    clearButtonDisabled={!storyboardHasContent || storyboardHasLoadingCells}
+                    actionRef={storyboardGridActionRef}
+                    storyboardShellStyle={storyboardShellStyle}
+                    storyboardDragSensors={storyboardDragSensors}
+                    storyboardGridStyle={storyboardGridStyle}
+                    isSorting={Boolean(activeStoryboardDragId)}
+                    storyboardSortableIds={storyboardSortableIds}
+                    storyboardCellList={storyboardCellList}
+                    isMobilePerformanceMode={isMobilePerformanceMode}
+                    interactionRef={storyboardCellInteractionRef}
+                    activeStoryboardDragCell={activeStoryboardDragCell}
+                  />
 
                   <div
                     className={`storyboard-style-disclosure professional-storyboard-disclosure${storyboardImageControlsCollapsed ? "" : " is-open"}`}
