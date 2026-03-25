@@ -140,6 +140,14 @@ const CANVAS_SIZE_OPTIONS = [
     layoutColumns: 1,
   },
   {
+    value: "xiaohongshu-cover-2-grid",
+    label: "小红书封面左右布局",
+    width: 1080,
+    height: 1440,
+    layoutRows: 1,
+    layoutColumns: 2,
+  },
+  {
     value: "xiaohongshu-cover-8-grid",
     label: "小红书封面8宫格",
     width: 1080,
