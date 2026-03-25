@@ -1333,7 +1333,7 @@ function buildDownloadNameWithOptions({ mimeType = "image/png", suffix = "" } = 
   return `banana-${datePart}-${timePart}${safeSuffix}.${getFileExtensionFromMimeType(mimeType)}`;
 }
 
-function buildProfessionalSceneArchiveDownloadName() {
+function buildProfessionalSceneArchiveBaseName() {
   const now = new Date();
   const datePart = [
     now.getFullYear(),
@@ -1346,7 +1346,311 @@ function buildProfessionalSceneArchiveDownloadName() {
     String(now.getSeconds()).padStart(2, "0"),
   ].join("");
 
-  return `banana-${datePart}-${timePart}-professional-scene.json`;
+  return `banana-${datePart}-${timePart}-professional-scene`;
+}
+
+function sanitizeExportFileBaseName(value, fallbackValue = "banana-export") {
+  const normalizedFallback =
+    typeof fallbackValue === "string" && fallbackValue.trim()
+      ? fallbackValue.trim()
+      : "banana-export";
+  const normalizedValue = typeof value === "string" ? value.trim() : "";
+  const withoutExtension = normalizedValue.replace(/\.(json|zip)$/i, "");
+  const sanitizedValue = withoutExtension
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+/g, "")
+    .replace(/[. ]+$/g, "")
+    .slice(0, 120);
+
+  return sanitizedValue || normalizedFallback;
+}
+
+function buildProfessionalSceneArchiveDownloadName(baseName = buildProfessionalSceneArchiveBaseName()) {
+  return `${sanitizeExportFileBaseName(baseName, buildProfessionalSceneArchiveBaseName())}.json`;
+}
+
+function buildProfessionalSceneArchiveZipDownloadName(
+  baseName = buildProfessionalSceneArchiveBaseName(),
+) {
+  return `${sanitizeExportFileBaseName(baseName, buildProfessionalSceneArchiveBaseName())}.zip`;
+}
+
+function buildZipCrc32Table() {
+  const table = new Uint32Array(256);
+
+  for (let index = 0; index < 256; index += 1) {
+    let currentValue = index;
+
+    for (let bit = 0; bit < 8; bit += 1) {
+      currentValue =
+        (currentValue & 1) === 1
+          ? 0xedb88320 ^ (currentValue >>> 1)
+          : currentValue >>> 1;
+    }
+
+    table[index] = currentValue >>> 0;
+  }
+
+  return table;
+}
+
+const ZIP_CRC32_TABLE = buildZipCrc32Table();
+
+function computeZipCrc32(bytes) {
+  let crc = 0xffffffff;
+
+  for (const byte of bytes) {
+    crc = ZIP_CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function encodeBase64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+function createStoredZipBlob(entries) {
+  const encoder = new TextEncoder();
+  const normalizedEntries = entries
+    .map((entry) => {
+      const normalizedPath = String(entry?.path || "")
+        .replace(/\\/g, "/")
+        .replace(/^\/+/g, "")
+        .replace(/\/+/g, "/");
+
+      if (!normalizedPath) {
+        return null;
+      }
+
+      const dataBytes =
+        typeof entry?.data === "string"
+          ? encoder.encode(entry.data)
+          : entry?.data instanceof Uint8Array
+            ? entry.data
+            : null;
+
+      if (!dataBytes) {
+        return null;
+      }
+
+      return {
+        path: normalizedPath,
+        pathBytes: encoder.encode(normalizedPath),
+        dataBytes,
+        modifiedAt: entry?.modifiedAt instanceof Date ? entry.modifiedAt : new Date(),
+      };
+    })
+    .filter(Boolean);
+  const chunks = [];
+  const centralDirectoryEntries = [];
+  let offset = 0;
+
+  normalizedEntries.forEach((entry) => {
+    const usesUtf8 = /[^\x00-\x7f]/.test(entry.path);
+    const generalPurposeBitFlag = usesUtf8 ? 0x0800 : 0;
+    const crc32 = computeZipCrc32(entry.dataBytes);
+    const dosYear = Math.max(entry.modifiedAt.getFullYear(), 1980);
+    const dosDate =
+      ((dosYear - 1980) << 9) |
+      ((entry.modifiedAt.getMonth() + 1) << 5) |
+      entry.modifiedAt.getDate();
+    const dosTime =
+      (entry.modifiedAt.getHours() << 11) |
+      (entry.modifiedAt.getMinutes() << 5) |
+      Math.floor(entry.modifiedAt.getSeconds() / 2);
+    const localHeader = new ArrayBuffer(30);
+    const localHeaderView = new DataView(localHeader);
+
+    localHeaderView.setUint32(0, 0x04034b50, true);
+    localHeaderView.setUint16(4, 20, true);
+    localHeaderView.setUint16(6, generalPurposeBitFlag, true);
+    localHeaderView.setUint16(8, 0, true);
+    localHeaderView.setUint16(10, dosTime, true);
+    localHeaderView.setUint16(12, dosDate, true);
+    localHeaderView.setUint32(14, crc32, true);
+    localHeaderView.setUint32(18, entry.dataBytes.length, true);
+    localHeaderView.setUint32(22, entry.dataBytes.length, true);
+    localHeaderView.setUint16(26, entry.pathBytes.length, true);
+    localHeaderView.setUint16(28, 0, true);
+
+    chunks.push(localHeader, entry.pathBytes, entry.dataBytes);
+    centralDirectoryEntries.push({
+      crc32,
+      dataLength: entry.dataBytes.length,
+      dosDate,
+      dosTime,
+      generalPurposeBitFlag,
+      offset,
+      pathBytes: entry.pathBytes,
+    });
+    offset += 30 + entry.pathBytes.length + entry.dataBytes.length;
+  });
+
+  const centralDirectoryOffset = offset;
+
+  centralDirectoryEntries.forEach((entry) => {
+    const centralHeader = new ArrayBuffer(46);
+    const centralHeaderView = new DataView(centralHeader);
+
+    centralHeaderView.setUint32(0, 0x02014b50, true);
+    centralHeaderView.setUint16(4, 20, true);
+    centralHeaderView.setUint16(6, 20, true);
+    centralHeaderView.setUint16(8, entry.generalPurposeBitFlag, true);
+    centralHeaderView.setUint16(10, 0, true);
+    centralHeaderView.setUint16(12, entry.dosTime, true);
+    centralHeaderView.setUint16(14, entry.dosDate, true);
+    centralHeaderView.setUint32(16, entry.crc32, true);
+    centralHeaderView.setUint32(20, entry.dataLength, true);
+    centralHeaderView.setUint32(24, entry.dataLength, true);
+    centralHeaderView.setUint16(28, entry.pathBytes.length, true);
+    centralHeaderView.setUint16(30, 0, true);
+    centralHeaderView.setUint16(32, 0, true);
+    centralHeaderView.setUint16(34, 0, true);
+    centralHeaderView.setUint16(36, 0, true);
+    centralHeaderView.setUint32(38, 0, true);
+    centralHeaderView.setUint32(42, entry.offset, true);
+
+    chunks.push(centralHeader, entry.pathBytes);
+    offset += 46 + entry.pathBytes.length;
+  });
+
+  const endOfCentralDirectory = new ArrayBuffer(22);
+  const endOfCentralDirectoryView = new DataView(endOfCentralDirectory);
+
+  endOfCentralDirectoryView.setUint32(0, 0x06054b50, true);
+  endOfCentralDirectoryView.setUint16(4, 0, true);
+  endOfCentralDirectoryView.setUint16(6, 0, true);
+  endOfCentralDirectoryView.setUint16(8, centralDirectoryEntries.length, true);
+  endOfCentralDirectoryView.setUint16(10, centralDirectoryEntries.length, true);
+  endOfCentralDirectoryView.setUint32(12, offset - centralDirectoryOffset, true);
+  endOfCentralDirectoryView.setUint32(16, centralDirectoryOffset, true);
+  endOfCentralDirectoryView.setUint16(20, 0, true);
+
+  chunks.push(endOfCentralDirectory);
+
+  return new Blob(chunks, {
+    type: "application/zip",
+  });
+}
+
+function buildProfessionalSceneAssetPackage(archive, baseName) {
+  const safeBaseName = sanitizeExportFileBaseName(
+    baseName,
+    buildProfessionalSceneArchiveBaseName(),
+  );
+  const normalizedArchive = JSON.parse(JSON.stringify(archive || {}));
+  const assetEntries = [];
+  const extractedAt = new Date().toISOString();
+
+  normalizedArchive.package = {
+    format: "zip-with-assets",
+    extractedAt,
+    assetRoot: "images",
+  };
+
+  normalizedArchive.state = normalizedArchive.state || {};
+  normalizedArchive.state.referenceImages = Array.isArray(normalizedArchive.state.referenceImages)
+    ? normalizedArchive.state.referenceImages.map((image, index) => {
+        if (!image?.data || !image?.mimeType) {
+          return image;
+        }
+
+        const assetPath = `images/reference/reference-${index + 1}.${getFileExtensionFromMimeType(image.mimeType)}`;
+        const { data: _data, ...imageWithoutInlineData } = image;
+
+        assetEntries.push({
+          path: assetPath,
+          data: encodeBase64ToBytes(image.data),
+        });
+
+        return {
+          ...imageWithoutInlineData,
+          assetPath,
+        };
+      })
+    : [];
+
+  normalizedArchive.state.storyboardCells =
+    normalizedArchive.state.storyboardCells &&
+    typeof normalizedArchive.state.storyboardCells === "object" &&
+    !Array.isArray(normalizedArchive.state.storyboardCells)
+      ? Object.fromEntries(
+          Object.entries(normalizedArchive.state.storyboardCells).map(([cellId, cell]) => {
+            const safeCellFolderName = sanitizeExportFileBaseName(cellId, "cell");
+            const cellReferenceImages = Array.isArray(cell?.referenceImages)
+              ? cell.referenceImages.map((image, index) => {
+                  if (!image?.data || !image?.mimeType) {
+                    return image;
+                  }
+
+                  const assetPath = `images/storyboard/${safeCellFolderName}/reference-${index + 1}.${getFileExtensionFromMimeType(image.mimeType)}`;
+                  const { data: _data, ...imageWithoutInlineData } = image;
+
+                  assetEntries.push({
+                    path: assetPath,
+                    data: encodeBase64ToBytes(image.data),
+                  });
+
+                  return {
+                    ...imageWithoutInlineData,
+                    assetPath,
+                  };
+                })
+              : [];
+            const record =
+              cell?.record?.imageBase64 && cell?.record?.mimeType
+                ? (() => {
+                    const assetPath = `images/storyboard/${safeCellFolderName}/result.${getFileExtensionFromMimeType(cell.record.mimeType)}`;
+                    const { imageBase64: _imageBase64, ...recordWithoutInlineData } = cell.record;
+
+                    assetEntries.push({
+                      path: assetPath,
+                      data: encodeBase64ToBytes(cell.record.imageBase64),
+                    });
+
+                    return {
+                      ...recordWithoutInlineData,
+                      assetPath,
+                    };
+                  })()
+                : cell?.record || null;
+
+            return [
+              cellId,
+              {
+                ...cell,
+                referenceImages: cellReferenceImages,
+                record,
+              },
+            ];
+          }),
+        )
+      : {};
+
+  const zipEntries = [
+    {
+      path: `${safeBaseName}/${safeBaseName}.json`,
+      data: JSON.stringify(normalizedArchive, null, 2),
+    },
+    ...assetEntries.map((entry) => ({
+      path: `${safeBaseName}/${entry.path}`,
+      data: entry.data,
+    })),
+  ];
+
+  return {
+    blob: createStoredZipBlob(zipEntries),
+    filename: buildProfessionalSceneArchiveZipDownloadName(safeBaseName),
+  };
 }
 
 function formatPersistedAt(value) {
@@ -3272,6 +3576,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [studioPending, setStudioPending] = useState(false);
   const [professionalExportPending, setProfessionalExportPending] = useState(false);
   const [professionalSceneTransferPending, setProfessionalSceneTransferPending] = useState(false);
+  const [professionalSceneExportDialog, setProfessionalSceneExportDialog] = useState(null);
   const [enhancePending, setEnhancePending] = useState(false);
   const [backendRequestCount, setBackendRequestCount] = useState(0);
   const [backendBusyLabel, setBackendBusyLabel] = useState("");
@@ -3351,6 +3656,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardEditorMode, setStoryboardEditorMode] = useState(STORYBOARD_EDITOR_MODE_GENERATE);
   const [storyboardLibraryPickerOpen, setStoryboardLibraryPickerOpen] = useState(false);
   const [storyboardLibraryPickerPending, setStoryboardLibraryPickerPending] = useState(false);
+  const [pendingScenarioSwitch, setPendingScenarioSwitch] = useState(null);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
   const [storyboardCellClearConfirmCellId, setStoryboardCellClearConfirmCellId] = useState("");
   const [requestTaskCancelConfirmId, setRequestTaskCancelConfirmId] = useState("");
@@ -5573,44 +5879,144 @@ function BananaStudioApp({ routeMode = "login" }) {
     ]);
   }
 
-  async function handleExportProfessionalScene() {
-    if (!professionalSceneTransferReady) {
+  function buildCurrentProfessionalSceneArchive() {
+    return buildProfessionalSceneArchive({
+      selectedModelId: professionalSelectedModelId,
+      globalPrompt: professionalGlobalPrompt,
+      canvasSize: professionalCanvasSize,
+      customScenarios: professionalCustomScenarios,
+      customCanvasWidth: professionalCustomCanvasWidth,
+      customCanvasHeight: professionalCustomCanvasHeight,
+      layoutRows: professionalLayoutRows,
+      layoutColumns: professionalLayoutColumns,
+      storyboardAspectRatio: professionalStoryboardAspectRatioValue,
+      storyboardImageSize: professionalStoryboardImageSizeValue,
+      selectedImageCount: professionalSelectedImageCount,
+      storyboardDividerWidthPx: professionalStoryboardDividerWidthPx,
+      storyboardCaptionFontSizePercent: professionalStoryboardCaptionFontSizePercent,
+      storyboardCaptionBackgroundAlphaPercent:
+        professionalStoryboardCaptionBackgroundAlphaPercent,
+      referenceImages,
+      storyboardCells,
+    });
+  }
+
+  function closeProfessionalSceneExportDialog() {
+    if (professionalSceneTransferPending) {
       return;
     }
 
+    setProfessionalSceneExportDialog(null);
+  }
+
+  function openProfessionalSceneExportDialog(kind) {
+    if (professionalSceneTransferPending || !professionalSceneTransferReady) {
+      return;
+    }
+
+    const defaultFileName = buildProfessionalSceneArchiveBaseName();
+
+    setStudioError("");
+    setProfessionalSceneExportDialog({
+      kind,
+      defaultFileName,
+      fileName: defaultFileName,
+    });
+  }
+
+  function handleProfessionalSceneExportFileNameChange(value) {
+    setProfessionalSceneExportDialog((currentValue) =>
+      currentValue
+        ? {
+            ...currentValue,
+            fileName: value,
+          }
+        : currentValue,
+    );
+  }
+
+  async function handleConfirmProfessionalSceneExport() {
+    if (!professionalSceneTransferReady || !professionalSceneExportDialog?.kind) {
+      return;
+    }
+
+    const fallbackBaseName =
+      professionalSceneExportDialog.defaultFileName || buildProfessionalSceneArchiveBaseName();
+    const exportBaseName = sanitizeExportFileBaseName(
+      professionalSceneExportDialog.fileName,
+      fallbackBaseName,
+    );
+
     setProfessionalSceneTransferPending(true);
     setStudioError("");
+    setStudioNotice("");
 
     try {
-      const archive = buildProfessionalSceneArchive({
-        selectedModelId: professionalSelectedModelId,
-        globalPrompt: professionalGlobalPrompt,
-        canvasSize: professionalCanvasSize,
-        customScenarios: professionalCustomScenarios,
-        customCanvasWidth: professionalCustomCanvasWidth,
-        customCanvasHeight: professionalCustomCanvasHeight,
-        layoutRows: professionalLayoutRows,
-        layoutColumns: professionalLayoutColumns,
-        storyboardAspectRatio: professionalStoryboardAspectRatioValue,
-        storyboardImageSize: professionalStoryboardImageSizeValue,
-        selectedImageCount: professionalSelectedImageCount,
-        storyboardDividerWidthPx: professionalStoryboardDividerWidthPx,
-        storyboardCaptionFontSizePercent: professionalStoryboardCaptionFontSizePercent,
-        storyboardCaptionBackgroundAlphaPercent:
-          professionalStoryboardCaptionBackgroundAlphaPercent,
-        referenceImages,
-        storyboardCells,
-      });
+      const archive = buildCurrentProfessionalSceneArchive();
 
-      downloadTextFile(
-        buildProfessionalSceneArchiveDownloadName(),
-        JSON.stringify(archive, null, 2),
-      );
+      if (professionalSceneExportDialog.kind === "zip") {
+        const { blob, filename } = buildProfessionalSceneAssetPackage(archive, exportBaseName);
+        await saveBlobFile(blob, filename);
+        setStudioNotice(`已导出 ${filename}`);
+      } else {
+        downloadTextFile(
+          buildProfessionalSceneArchiveDownloadName(exportBaseName),
+          JSON.stringify(archive, null, 2),
+        );
+        setStudioNotice(
+          `已导出 ${buildProfessionalSceneArchiveDownloadName(exportBaseName)}`,
+        );
+      }
+
+      setProfessionalSceneExportDialog(null);
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "专业模式场景导出失败");
     } finally {
       setProfessionalSceneTransferPending(false);
     }
+  }
+
+  function handleSwitchScenarioWithExport() {
+    if (!pendingScenarioSwitch?.value || storyboardHasLoadingCells) {
+      return;
+    }
+
+    const { value, label } = pendingScenarioSwitch;
+    const archive = buildCurrentProfessionalSceneArchive();
+    const filename = buildProfessionalSceneArchiveDownloadName();
+
+    try {
+      downloadTextFile(filename, JSON.stringify(archive, null, 2));
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "导出场景失败");
+      return;
+    }
+
+    if (!clearStoryboardWithoutConfirm()) {
+      return;
+    }
+
+    applyProfessionalScenarioChange(value);
+    closeScenarioManager();
+    setStudioError("");
+    setStudioNotice(`已导出 ${filename}，并切换到 ${label}`);
+  }
+
+  function handleSwitchScenarioWithoutSaving() {
+    if (!pendingScenarioSwitch?.value || storyboardHasLoadingCells) {
+      return;
+    }
+
+    const { value, label } = pendingScenarioSwitch;
+
+    if (!clearStoryboardWithoutConfirm()) {
+      return;
+    }
+
+    applyProfessionalScenarioChange(value);
+    closeScenarioManager();
+    setStudioError("");
+    setStudioNotice(`已放弃当前修改，并切换到 ${label}`);
   }
 
   function handleOpenProfessionalSceneImport() {
@@ -5968,7 +6374,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     ]);
   }
 
-  function handleProfessionalScenarioChange(value) {
+  function applyProfessionalScenarioChange(value) {
     const scenario = getCanvasScenarioOption(value, professionalCustomScenarios);
     const nextRows = clampLayoutTrack(scenario.layoutRows);
     const nextColumns = clampLayoutTrack(scenario.layoutColumns);
@@ -5993,6 +6399,47 @@ function BananaStudioApp({ routeMode = "login" }) {
     if (nextRecommendedAspectRatio?.option?.value) {
       setProfessionalStoryboardAspectRatio(nextRecommendedAspectRatio.option.value);
     }
+  }
+
+  function clearStoryboardWithoutConfirm() {
+    if (storyboardHasLoadingCells) {
+      return false;
+    }
+
+    setStoryboardCells(normalizeStoryboardCells({}, professionalLayoutRows, professionalLayoutColumns));
+    setStoryboardClearConfirmOpen(false);
+    setPendingScenarioSwitch(null);
+    closeStoryboardEditor();
+    return true;
+  }
+
+  function closePendingScenarioSwitchDialog() {
+    setPendingScenarioSwitch(null);
+  }
+
+  function handleProfessionalScenarioChange(value) {
+    const normalizedValue = normalizeTextValue(value);
+
+    if (!normalizedValue || normalizedValue === professionalCanvasSize) {
+      return;
+    }
+
+    if (storyboardHasLoadingCells) {
+      setStudioError("当前还有分镜在生成中，请等待完成后再切换场景。");
+      return;
+    }
+
+    if (storyboardHasContent) {
+      const targetScenario = getCanvasScenarioOption(normalizedValue, professionalCustomScenarios);
+      setStudioError("");
+      setPendingScenarioSwitch({
+        value: targetScenario.value,
+        label: targetScenario.label,
+      });
+      return;
+    }
+
+    applyProfessionalScenarioChange(normalizedValue);
   }
 
   function buildScenarioManagerDraft(sourceScenario = null) {
@@ -6353,13 +6800,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function handleClearStoryboard() {
-    if (storyboardHasLoadingCells) {
-      return;
-    }
-
-    setStoryboardCells(normalizeStoryboardCells({}, professionalLayoutRows, professionalLayoutColumns));
-    closeStoryboardClearConfirm();
-    closeStoryboardEditor();
+    clearStoryboardWithoutConfirm();
   }
 
   function openStoryboardCellClearConfirm(cellId) {
@@ -7902,12 +8343,12 @@ function BananaStudioApp({ routeMode = "login" }) {
                           <path d="M4.2 14.8h11.6" />
                           <path d="M5.3 14.8v.8c0 .8.6 1.4 1.4 1.4h6.6c.8 0 1.4-.6 1.4-1.4v-.8" />
                         </svg>
-                        <span>{professionalSceneTransferPending ? "处理中..." : "导入"}</span>
+                        <span>{professionalSceneTransferPending ? "处理中..." : "导入场景"}</span>
                       </button>
                       <button
                         type="button"
                         className="ghost-button professional-export-transfer-button"
-                        onClick={handleExportProfessionalScene}
+                        onClick={() => openProfessionalSceneExportDialog("json")}
                         disabled={!professionalSceneTransferReady || professionalSceneTransferPending}
                       >
                         <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -7916,7 +8357,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                           <path d="M4.2 5.2h11.6" />
                           <path d="M5.3 5.2v-.8c0-.8.6-1.4 1.4-1.4h6.6c.8 0 1.4.6 1.4 1.4v.8" />
                         </svg>
-                        <span>{professionalSceneTransferPending ? "处理中..." : "导出"}</span>
+                        <span>{professionalSceneTransferPending ? "处理中..." : "导出场景"}</span>
                       </button>
                       <button
                         type="button"
@@ -8054,6 +8495,30 @@ function BananaStudioApp({ routeMode = "login" }) {
                       disabled={professionalExportPending || !professionalExportHasRenderableContent}
                     >
                       {professionalExportPending ? "正在导出..." : "下载 PNG"}
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button professional-export-download-button professional-export-zip-button"
+                      onClick={() => openProfessionalSceneExportDialog("zip")}
+                      disabled={!professionalSceneTransferReady || professionalSceneTransferPending}
+                    >
+                      <svg
+                        className="professional-export-zip-button-icon"
+                        viewBox="0 0 20 20"
+                        aria-hidden="true"
+                      >
+                        <path d="M6.2 3.1h6.3l2.5 2.6v8.1a2 2 0 0 1-2 2H6.2a2 2 0 0 1-2-2V5.1a2 2 0 0 1 2-2Z" />
+                        <path d="M12.5 3.1v2.6h2.5" />
+                        <path d="M10 6.1v1.2" />
+                        <path d="M10 8.5v1.2" />
+                        <path d="M10 10.9v1.2" />
+                        <path d="M8.3 8.5h3.4" />
+                        <path d="M8.3 10.9h3.4" />
+                        <path d="M8.3 13.3h3.4" />
+                      </svg>
+                      <span>
+                        {professionalSceneTransferPending ? "处理中..." : "下载图片素材包"}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -8751,6 +9216,86 @@ function BananaStudioApp({ routeMode = "login" }) {
           </form>
         </section>
       </main>
+      {professionalSceneExportDialog ? (
+        <div
+          className="storyboard-confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={
+            professionalSceneExportDialog.kind === "zip"
+              ? "下载图片素材包"
+              : "导出 JSON 配置"
+          }
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeProfessionalSceneExportDialog();
+            }
+          }}
+        >
+          <section className="storyboard-confirm-panel professional-scene-export-dialog">
+            <strong>
+              {professionalSceneExportDialog.kind === "zip"
+                ? "下载图片素材包"
+                : "导出 JSON 配置"}
+            </strong>
+            <p>
+              {professionalSceneExportDialog.kind === "zip"
+                ? "会把当前专业模式配置导出为一个 ZIP，里面包含一份去掉内嵌图片的 JSON 和 images 文件夹。后续如果要直接回导到 banana，请使用 JSON 导出。"
+                : "确认这次导出的配置名。默认名已经带时间戳，你也可以直接改成更好记的名字。"}
+            </p>
+            <label className="image-option-field" htmlFor="professionalSceneExportFileName">
+              <span className="field-label">配置名</span>
+              <input
+                id="professionalSceneExportFileName"
+                name="professionalSceneExportFileName"
+                type="text"
+                autoFocus
+                value={professionalSceneExportDialog.fileName}
+                onChange={(event) =>
+                  handleProfessionalSceneExportFileNameChange(event.target.value)
+                }
+                placeholder={professionalSceneExportDialog.defaultFileName}
+              />
+            </label>
+            <p className="professional-scene-export-dialog-note">
+              将保存为{" "}
+              <strong>
+                {professionalSceneExportDialog.kind === "zip"
+                  ? buildProfessionalSceneArchiveZipDownloadName(
+                      professionalSceneExportDialog.fileName ||
+                        professionalSceneExportDialog.defaultFileName,
+                    )
+                  : buildProfessionalSceneArchiveDownloadName(
+                      professionalSceneExportDialog.fileName ||
+                        professionalSceneExportDialog.defaultFileName,
+                    )}
+              </strong>
+            </p>
+            <div className="storyboard-confirm-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={closeProfessionalSceneExportDialog}
+                disabled={professionalSceneTransferPending}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={handleConfirmProfessionalSceneExport}
+                disabled={professionalSceneTransferPending}
+              >
+                {professionalSceneTransferPending
+                  ? "处理中..."
+                  : professionalSceneExportDialog.kind === "zip"
+                    ? "下载图片素材包"
+                    : "下载 JSON"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {taskManagerOpen ? (
         <div
           className="task-manager-overlay"
@@ -9016,8 +9561,17 @@ function BananaStudioApp({ routeMode = "login" }) {
                         type="button"
                         className="primary-button"
                         onClick={() => {
+                          const shouldCloseImmediately =
+                            !storyboardHasContent &&
+                            !storyboardHasLoadingCells &&
+                            normalizeTextValue(scenarioManagerSelectedId) &&
+                            scenarioManagerSelectedId !== professionalCanvasSize;
+
                           handleProfessionalScenarioChange(scenarioManagerSelectedId);
-                          closeScenarioManager();
+
+                          if (shouldCloseImmediately) {
+                            closeScenarioManager();
+                          }
                         }}
                       >
                         使用这个场景
@@ -9626,6 +10180,50 @@ function BananaStudioApp({ routeMode = "login" }) {
                 onClick={handleClearStoryboard}
               >
                 确认清空
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+      {pendingScenarioSwitch ? (
+        <div
+          className="storyboard-confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`切换到 ${pendingScenarioSwitch.label}`}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closePendingScenarioSwitchDialog();
+            }
+          }}
+        >
+          <section className="storyboard-confirm-panel">
+            <strong>切换到 {pendingScenarioSwitch.label} 前先处理当前内容</strong>
+            <p>
+              当前分镜表格里还有已填写内容或已生成图片。你可以先导出一份场景 JSON
+              再切换，或者放弃这次修改直接切换。
+            </p>
+            <div className="storyboard-confirm-actions storyboard-confirm-actions-split">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={closePendingScenarioSwitchDialog}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={handleSwitchScenarioWithExport}
+              >
+                导出场景后切换
+              </button>
+              <button
+                type="button"
+                className="primary-button storyboard-confirm-danger"
+                onClick={handleSwitchScenarioWithoutSaving}
+              >
+                放弃修改直接切换
               </button>
             </div>
           </section>

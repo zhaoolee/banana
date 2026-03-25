@@ -2244,6 +2244,30 @@ textarea:focus {
   gap: 12px;
 }
 
+.storyboard-confirm-actions-split {
+  flex-wrap: wrap;
+}
+
+.storyboard-confirm-actions-split > * {
+  flex: 1 1 180px;
+}
+
+.professional-scene-export-dialog {
+  width: min(520px, 100%);
+}
+
+.professional-scene-export-dialog-note {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.professional-scene-export-dialog-note strong {
+  color: rgba(69, 45, 8, 0.96);
+}
+
 .storyboard-confirm-danger {
   background: linear-gradient(135deg, #ffb347 0%, #ff9f1a 100%);
 }
@@ -3019,8 +3043,40 @@ textarea {
 }
 
 .professional-export-download-row {
-  display: flex;
+  display: grid;
+  gap: 10px;
   width: 100%;
+}
+
+.professional-export-zip-button {
+  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border: 1px solid rgba(46, 46, 46, 0.14);
+  background: #efefef;
+  color: rgba(26, 26, 26, 0.96);
+  box-shadow: 0 18px 32px rgba(22, 22, 22, 0.1);
+}
+
+.professional-export-zip-button:hover {
+  background: #e4e4e4;
+}
+
+.professional-export-zip-button:disabled {
+  box-shadow: none;
+}
+
+.professional-export-zip-button-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .professional-export-global-prompt {
