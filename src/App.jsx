@@ -576,6 +576,15 @@ function buildStoryboardCellTaskPatch(task, currentCell) {
     };
   }
 
+  if (task.status === "cancelled") {
+    return {
+      status: currentCell?.record ? "success" : "idle",
+      statusText: task.message || "已取消当前任务",
+      error: "",
+      pendingRequestId: "",
+    };
+  }
+
   if (task.status === "recovered" || task.status === "succeeded") {
     if (currentCell?.record) {
       return {
@@ -1376,6 +1385,8 @@ function getRequestTaskStatusLabel(task) {
   }
 
   switch (task?.status) {
+    case "cancelled":
+      return "已取消";
     case "queued":
       return "排队中";
     case "processing":
@@ -1790,6 +1801,35 @@ function formatStreamPreviewText(value) {
   return text.length > 140 ? `${text.slice(0, 140)}...` : text;
 }
 
+function createRequestCancelledError() {
+  const error = new Error("任务已取消");
+  error.code = "BANANA_TASK_CANCELLED";
+  return error;
+}
+
+function isRequestCancelledError(error) {
+  return (
+    error?.code === "BANANA_TASK_CANCELLED" ||
+    normalizeTextValue(error?.message) === "任务已取消" ||
+    normalizeTextValue(error?.message) === "请求已取消"
+  );
+}
+
+function buildCancelledRequestTaskPatch(message = "任务已取消") {
+  return {
+    status: "cancelled",
+    stage: "cancelled",
+    message,
+    error: "",
+    queuePosition: 0,
+    queueActiveCount: 0,
+    queuePendingCount: 0,
+    queueConcurrency: 0,
+    queueRateLimitWaitMs: 0,
+    queueRateLimitedUntil: "",
+  };
+}
+
 async function parseJsonResponse(response) {
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
@@ -1901,6 +1941,15 @@ async function fetchRetryableGenerationRequest(password, requestId) {
   return parseJsonResponse(response);
 }
 
+async function fetchCancelableGenerationRequest(password, requestId) {
+  const response = await fetch(`/api/generations/${encodeURIComponent(requestId)}/cancel`, {
+    method: "POST",
+    headers: buildPwHeaders(password),
+  });
+
+  return parseJsonResponse(response);
+}
+
 function createSseBufferDrainer(handleSseEvent) {
   return function drainSseBuffer(currentBuffer, flush = false) {
     let nextBuffer = currentBuffer;
@@ -1947,6 +1996,7 @@ function createSseBufferDrainer(handleSseEvent) {
 
 async function requestSseJsonStream(password, endpoint, payload, handlers = {}) {
   const abortController = new AbortController();
+  const externalSignal = handlers.signal;
   let timeoutId = 0;
   let hasReceivedEvent = false;
 
@@ -2003,6 +2053,22 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
   });
 
   armStreamTimeout();
+
+  function handleExternalAbort() {
+    abortController.abort(
+      externalSignal?.reason instanceof Error
+        ? externalSignal.reason
+        : createRequestCancelledError(),
+    );
+  }
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      handleExternalAbort();
+    } else {
+      externalSignal.addEventListener("abort", handleExternalAbort, { once: true });
+    }
+  }
 
   try {
     const response = await fetch(endpoint, {
@@ -2063,6 +2129,8 @@ async function requestSseJsonStream(password, endpoint, payload, handlers = {}) 
     }
 
     throw error;
+  } finally {
+    externalSignal?.removeEventListener?.("abort", handleExternalAbort);
   }
 }
 
@@ -2397,7 +2465,11 @@ function buildProfessionalGenerationPayload({
   };
 }
 
-function buildProfessionalReferenceImages(images = [], limit = PROFESSIONAL_STYLE_REFERENCE_LIMIT) {
+function buildProfessionalReferenceImages(
+  images = [],
+  limit = PROFESSIONAL_STYLE_REFERENCE_LIMIT,
+  role = "content",
+) {
   return images
     .slice(0, limit)
     .filter((image) => image?.data && image?.mimeType)
@@ -2405,6 +2477,7 @@ function buildProfessionalReferenceImages(images = [], limit = PROFESSIONAL_STYL
       name: image.name,
       mimeType: image.mimeType,
       data: image.data,
+      role: image.role || role,
     }));
 }
 
@@ -2412,6 +2485,10 @@ function buildProfessionalStoryboardPrompt(globalPrompt, cellPrompt) {
   const normalizedGlobalPrompt = normalizeTextValue(globalPrompt);
   const normalizedCellPrompt = normalizeTextValue(cellPrompt);
   const promptParts = [];
+
+  promptParts.push(
+    "参考图规则：整体画风参考图只用于约束画风、笔触、色彩、材质和整体氛围，不用于指定主体、构图、动作或镜头。当前格子的参考图才是这个格子的内容参考；如果提示词里提到参考图、这张图、图1等，默认指当前格子的参考图，而不是整体画风参考图。",
+  );
 
   if (normalizedGlobalPrompt) {
     promptParts.push(`整体要求：${normalizedGlobalPrompt}`);
@@ -3239,6 +3316,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardLibraryPickerPending, setStoryboardLibraryPickerPending] = useState(false);
   const [storyboardClearConfirmOpen, setStoryboardClearConfirmOpen] = useState(false);
   const [storyboardCellClearConfirmCellId, setStoryboardCellClearConfirmCellId] = useState("");
+  const [requestTaskCancelConfirmId, setRequestTaskCancelConfirmId] = useState("");
   const [storyboardShareCopyState, setStoryboardShareCopyState] = useState("idle");
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
   const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
@@ -3254,12 +3332,15 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [professionalExportCardElement, setProfessionalExportCardElement] = useState(null);
   const requestTasks = useTaskStore((state) => state.requestTasks);
   const retryingRequestTaskIds = useTaskStore((state) => state.retryingRequestTaskIds);
+  const cancellingRequestTaskIds = useTaskStore((state) => state.cancellingRequestTaskIds);
   const taskManagerOpen = useTaskStore((state) => state.taskManagerOpen);
   const setTaskManagerOpen = useTaskStore((state) => state.setTaskManagerOpen);
   const upsertRequestTask = useTaskStore((state) => state.upsertRequestTask);
   const updateRequestTask = useTaskStore((state) => state.updateRequestTask);
   const startRetryingRequestTask = useTaskStore((state) => state.startRetryingRequestTask);
   const finishRetryingRequestTask = useTaskStore((state) => state.finishRetryingRequestTask);
+  const startCancellingRequestTask = useTaskStore((state) => state.startCancellingRequestTask);
+  const finishCancellingRequestTask = useTaskStore((state) => state.finishCancellingRequestTask);
   const clearTerminalRequestTasks = useTaskStore((state) => state.clearTerminalRequestTasks);
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
@@ -3277,6 +3358,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const taskStatusStreamRequestIdsRef = useRef([]);
   const taskStatusStreamPasswordRef = useRef("");
   const taskStatusStreamGenerationRef = useRef(0);
+  const requestAbortControllersRef = useRef(new Map());
   const professionalSceneImportInputRef = useRef(null);
   const referenceGridRef = useRef(null);
   const imagePreviewViewportRef = useRef(null);
@@ -3584,6 +3666,42 @@ function BananaStudioApp({ routeMode = "login" }) {
     };
   }
 
+  function registerRequestAbortController(requestId, abortController) {
+    if (!requestId || !abortController) {
+      return;
+    }
+
+    requestAbortControllersRef.current.set(requestId, abortController);
+  }
+
+  function unregisterRequestAbortController(requestId, abortController) {
+    if (!requestId) {
+      return;
+    }
+
+    const currentController = requestAbortControllersRef.current.get(requestId);
+
+    if (!currentController || (abortController && currentController !== abortController)) {
+      return;
+    }
+
+    requestAbortControllersRef.current.delete(requestId);
+  }
+
+  function abortRequestAbortController(requestId, reason = createRequestCancelledError()) {
+    if (!requestId) {
+      return;
+    }
+
+    const abortController = requestAbortControllersRef.current.get(requestId);
+
+    if (!abortController || abortController.signal.aborted) {
+      return;
+    }
+
+    abortController.abort(reason);
+  }
+
   async function executeRetryPayloadTask(task, retryPayload) {
     const resolvedStoryboardCellId =
       normalizeTextValue(task?.storyboardCellId) ||
@@ -3808,6 +3926,34 @@ function BananaStudioApp({ routeMode = "login" }) {
         });
         return {
           state: "failed",
+          data,
+        };
+      }
+
+      if (data?.status === "cancelled") {
+        const storyboardCellId =
+          normalizeTextValue(requestTask?.storyboardCellId) ||
+          findStoryboardCellIdByPendingRequestId(storyboardCells, requestTask?.requestId);
+
+        if (storyboardCellId) {
+          updateStoryboardCell(storyboardCellId, (cell) => ({
+            ...cell,
+            status: cell?.record ? "success" : "idle",
+            statusText: data?.message || "任务已取消",
+            error: "",
+            pendingRequestId: "",
+          }));
+        }
+
+        setStudioNotice(data?.message || "任务已取消");
+        setStudioError("");
+        updateRequestTask(
+          requestTask.requestId,
+          buildCancelledRequestTaskPatch(data?.message || "任务已取消"),
+        );
+
+        return {
+          state: "cancelled",
           data,
         };
       }
@@ -4373,6 +4519,9 @@ function BananaStudioApp({ routeMode = "login" }) {
       : null;
   const storyboardCellClearConfirmCell = storyboardCellClearConfirmCellId
     ? storyboardCells[storyboardCellClearConfirmCellId] || null
+    : null;
+  const requestTaskCancelConfirmTask = requestTaskCancelConfirmId
+    ? requestTasks.find((task) => task.requestId === requestTaskCancelConfirmId) || null
     : null;
   const storyboardHasContent = useMemo(
     () => storyboardCellList.some((cell) => doesStoryboardCellHaveContent(cell)),
@@ -4979,7 +5128,18 @@ function BananaStudioApp({ routeMode = "login" }) {
     setStoryboardEditorCellId("");
     setStoryboardClearConfirmOpen(false);
     setStoryboardCellClearConfirmCellId("");
+    setRequestTaskCancelConfirmId("");
   }, [isProfessionalPanelMode]);
+
+  useEffect(() => {
+    if (!requestTaskCancelConfirmId) {
+      return;
+    }
+
+    if (!requestTaskCancelConfirmTask || isRequestTaskTerminal(requestTaskCancelConfirmTask)) {
+      setRequestTaskCancelConfirmId("");
+    }
+  }, [requestTaskCancelConfirmId, requestTaskCancelConfirmTask]);
 
   useEffect(() => {
     if (
@@ -5018,6 +5178,11 @@ function BananaStudioApp({ routeMode = "login" }) {
 
         if (storyboardCellClearConfirmCellId) {
           closeStoryboardCellClearConfirm();
+          return;
+        }
+
+        if (requestTaskCancelConfirmId) {
+          closeRequestTaskCancelConfirm();
           return;
         }
 
@@ -5111,6 +5276,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       imagePreviewOpen ||
       resourceManagerOpen ||
       storyboardClearConfirmOpen ||
+      requestTaskCancelConfirmId ||
       typeof window === "undefined"
     ) {
       return;
@@ -5140,6 +5306,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     };
   }, [
     imagePreviewOpen,
+    requestTaskCancelConfirmId,
     resourceManagerOpen,
     storyboardClearConfirmOpen,
     storyboardEditorCellId,
@@ -6170,6 +6337,64 @@ function BananaStudioApp({ routeMode = "login" }) {
     closeStoryboardCellClearConfirm();
   }
 
+  function openRequestTaskCancelConfirm(requestId) {
+    const nextRequestId = normalizeTextValue(requestId);
+    const targetTask = nextRequestId
+      ? requestTasks.find((task) => task.requestId === nextRequestId) || null
+      : null;
+
+    if (
+      !targetTask ||
+      isRequestTaskTerminal(targetTask) ||
+      cancellingRequestTaskIds[nextRequestId]
+    ) {
+      return;
+    }
+
+    setRequestTaskCancelConfirmId(nextRequestId);
+  }
+
+  function closeRequestTaskCancelConfirm() {
+    setRequestTaskCancelConfirmId("");
+  }
+
+  async function handleConfirmCancelRequestTask() {
+    const targetTask = requestTaskCancelConfirmTask;
+    const requestId = normalizeTextValue(targetTask?.requestId);
+
+    if (!activePw || !requestId || isRequestTaskTerminal(targetTask)) {
+      closeRequestTaskCancelConfirm();
+      return;
+    }
+
+    startCancellingRequestTask(requestId);
+
+    try {
+      const data = await fetchCancelableGenerationRequest(activePw, requestId);
+      const cancelledMessage = data?.message || "任务已取消";
+
+      updateRequestTask(requestId, buildCancelledRequestTaskPatch(cancelledMessage));
+      abortRequestAbortController(requestId, createRequestCancelledError());
+      setStudioError("");
+      setStudioNotice(cancelledMessage);
+      closeRequestTaskCancelConfirm();
+    } catch (error) {
+      if (error?.status === 409 && normalizeTextValue(error?.message) === "任务已经取消") {
+        const cancelledMessage = "任务已取消";
+        updateRequestTask(requestId, buildCancelledRequestTaskPatch(cancelledMessage));
+        abortRequestAbortController(requestId, createRequestCancelledError());
+        setStudioError("");
+        setStudioNotice(cancelledMessage);
+        closeRequestTaskCancelConfirm();
+        return;
+      }
+
+      setStudioError(error instanceof Error ? error.message : "取消任务失败");
+    } finally {
+      finishCancellingRequestTask(requestId);
+    }
+  }
+
   function handleStoryboardPromptChange(value) {
     if (!storyboardEditorCellId) {
       return;
@@ -6382,13 +6607,19 @@ function BananaStudioApp({ routeMode = "login" }) {
       error: "",
     }));
     const releaseTaskRecoveryPause = beginTaskRecoveryPause();
+    const requestAbortController = new AbortController();
+
+    if (requestRecord?.requestId) {
+      registerRequestAbortController(requestRecord.requestId, requestAbortController);
+    }
 
     try {
       const mergedReferenceImages = [
-        ...buildProfessionalReferenceImages(globalReferenceImageRecords),
+        ...buildProfessionalReferenceImages(globalReferenceImageRecords, 1, "style"),
         ...buildProfessionalReferenceImages(
           editorCell.referenceImages,
           STORYBOARD_CELL_REFERENCE_LIMIT,
+          "content",
         ),
       ];
       const data = await requestProfessionalGeneration(
@@ -6407,6 +6638,7 @@ function BananaStudioApp({ routeMode = "login" }) {
           clientRequestId: requestRecord?.requestId,
         },
         {
+          signal: requestAbortController.signal,
           onStatus: (eventPayload) => {
             if (!eventPayload?.message) {
               if (requestRecord?.requestId) {
@@ -6485,6 +6717,22 @@ function BananaStudioApp({ routeMode = "login" }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "banana 生图失败";
 
+      if (isRequestCancelledError(error)) {
+        updateRequestTask(
+          requestRecord?.requestId,
+          buildCancelledRequestTaskPatch(message || "任务已取消"),
+        );
+        updateStoryboardCell(cellId, (cell) => ({
+          ...cell,
+          pendingRequestId: "",
+          status: previousRecord ? "success" : "idle",
+          statusText: message || "任务已取消",
+          error: "",
+          record: previousRecord,
+        }));
+        return;
+      }
+
       if (error?.status) {
         updateRequestTask(requestRecord?.requestId, {
           status: "failed",
@@ -6554,6 +6802,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         record: previousRecord,
       }));
     } finally {
+      unregisterRequestAbortController(requestRecord?.requestId, requestAbortController);
       releaseTaskRecoveryPause();
     }
   }
@@ -6647,6 +6896,12 @@ function BananaStudioApp({ routeMode = "login" }) {
       });
     }
 
+    const requestAbortController = new AbortController();
+
+    if (requestRecord?.requestId) {
+      registerRequestAbortController(requestRecord.requestId, requestAbortController);
+    }
+
     try {
       const payload = isSimpleTask
         ? {
@@ -6656,7 +6911,11 @@ function BananaStudioApp({ routeMode = "login" }) {
               aspectRatio,
               imageSize,
               imageCount,
-              referenceImages: buildProfessionalReferenceImages(referenceImageRecords),
+              referenceImages: buildProfessionalReferenceImages(
+                referenceImageRecords,
+                MAX_REFERENCE_IMAGES,
+                "content",
+              ),
             }),
             clientRequestId: requestRecord?.requestId,
           }
@@ -6669,7 +6928,11 @@ function BananaStudioApp({ routeMode = "login" }) {
               imageCount,
               layoutRows,
               layoutColumns,
-              referenceImages: buildProfessionalReferenceImages(referenceImageRecords),
+              referenceImages: buildProfessionalReferenceImages(
+                referenceImageRecords,
+                PROFESSIONAL_STYLE_REFERENCE_LIMIT,
+                "style",
+              ),
             }),
             clientRequestId: requestRecord?.requestId,
           };
@@ -6679,6 +6942,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         : requestProfessionalGeneration;
 
       const data = await requestGenerate(activePw, payload, {
+        signal: requestAbortController.signal,
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
@@ -6734,6 +6998,16 @@ function BananaStudioApp({ routeMode = "login" }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "banana 生图失败";
 
+      if (isRequestCancelledError(error)) {
+        setStudioError("");
+        setStudioNotice(message || "任务已取消");
+        updateRequestTask(
+          requestRecord?.requestId,
+          buildCancelledRequestTaskPatch(message || "任务已取消"),
+        );
+        return;
+      }
+
       if (error?.status) {
         setStudioNotice("");
         setStudioError(message);
@@ -6761,6 +7035,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         setStudioError("连接已中断，banana 仍在后端继续生成。恢复联网后会自动取回结果。");
       }
     } finally {
+      unregisterRequestAbortController(requestRecord?.requestId, requestAbortController);
       releaseTaskRecoveryPause();
       releaseBackendRequest();
       setStudioPending(false);
@@ -6834,6 +7109,12 @@ function BananaStudioApp({ routeMode = "login" }) {
       });
     }
 
+    const requestAbortController = new AbortController();
+
+    if (requestRecord?.requestId) {
+      registerRequestAbortController(requestRecord.requestId, requestAbortController);
+    }
+
     try {
       const payload = {
         modelId: sourceGenerationRecord.bananaModelId,
@@ -6855,6 +7136,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         clientRequestId: requestRecord?.requestId,
       };
       const data = await requestEnhancement(activePw, payload, {
+        signal: requestAbortController.signal,
         onStatus: (eventPayload) => {
           if (eventPayload?.message) {
             setBackendBusyLabel(eventPayload.message);
@@ -6918,6 +7200,16 @@ function BananaStudioApp({ routeMode = "login" }) {
     } catch (error) {
       const message = error instanceof Error ? error.message : "提升清晰度失败";
 
+      if (isRequestCancelledError(error)) {
+        setStudioError("");
+        setStudioNotice(message || "任务已取消");
+        updateRequestTask(
+          requestRecord?.requestId,
+          buildCancelledRequestTaskPatch(message || "任务已取消"),
+        );
+        return;
+      }
+
       if (error?.status) {
         setStudioNotice("");
         setStudioError(message);
@@ -6945,6 +7237,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         setStudioError("连接已中断，后端仍在继续提升图片。恢复联网后会自动取回结果。");
       }
     } finally {
+      unregisterRequestAbortController(requestRecord?.requestId, requestAbortController);
       releaseTaskRecoveryPause();
       releaseBackendRequest();
       setEnhancePending(false);
@@ -8445,16 +8738,54 @@ function BananaStudioApp({ routeMode = "login" }) {
                         <p className="task-manager-queue-note">{buildRequestTaskQueueSummary(task)}</p>
                       ) : null}
                       {task.error ? <p className="error-text task-manager-error">{task.error}</p> : null}
-                      {canRetryRequestTask(task) ? (
+                      {canRetryRequestTask(task) || !isRequestTaskTerminal(task) ? (
                         <div className="task-manager-actions">
-                          <button
-                            type="button"
-                            className="ghost-button task-manager-retry-button"
-                            onClick={() => handleRetryRequestTask(task)}
-                            disabled={Boolean(retryingRequestTaskIds[task.requestId])}
-                          >
-                            {retryingRequestTaskIds[task.requestId] ? "重试中..." : "重试"}
-                          </button>
+                          {!isRequestTaskTerminal(task) ? (
+                            cancellingRequestTaskIds[task.requestId] ? (
+                              <button
+                                type="button"
+                                className="ghost-button task-manager-retry-button"
+                                disabled
+                              >
+                                取消中...
+                              </button>
+                            ) : requestTaskCancelConfirmId === task.requestId ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="primary-button storyboard-confirm-danger task-manager-retry-button"
+                                  onClick={handleConfirmCancelRequestTask}
+                                >
+                                  确认取消任务
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost-button task-manager-retry-button"
+                                  onClick={closeRequestTaskCancelConfirm}
+                                >
+                                  放弃取消任务
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="ghost-button task-manager-retry-button"
+                                onClick={() => openRequestTaskCancelConfirm(task.requestId)}
+                              >
+                                取消任务
+                              </button>
+                            )
+                          ) : null}
+                          {canRetryRequestTask(task) ? (
+                            <button
+                              type="button"
+                              className="ghost-button task-manager-retry-button"
+                              onClick={() => handleRetryRequestTask(task)}
+                              disabled={Boolean(retryingRequestTaskIds[task.requestId])}
+                            >
+                              {retryingRequestTaskIds[task.requestId] ? "重试中..." : "重试"}
+                            </button>
+                          ) : null}
                         </div>
                       ) : null}
                     </article>
@@ -9055,6 +9386,47 @@ function BananaStudioApp({ routeMode = "login" }) {
                     </svg>
                     <span>清空当前格子</span>
                   </button>
+                  {isStoryboardEditorGenerateMode && storyboardEditorCell.status === "loading" ? (
+                    storyboardEditorCell.pendingRequestId &&
+                    requestTaskCancelConfirmId === storyboardEditorCell.pendingRequestId &&
+                    !cancellingRequestTaskIds[storyboardEditorCell.pendingRequestId] ? (
+                      <div className="inline-confirm-actions">
+                        <button
+                          type="button"
+                          className="primary-button storyboard-confirm-danger"
+                          onClick={handleConfirmCancelRequestTask}
+                        >
+                          确认取消任务
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={closeRequestTaskCancelConfirm}
+                        >
+                          放弃取消任务
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ghost-button storyboard-clear-button"
+                        onClick={() =>
+                          openRequestTaskCancelConfirm(storyboardEditorCell.pendingRequestId)
+                        }
+                        disabled={
+                          !storyboardEditorCell.pendingRequestId ||
+                          Boolean(cancellingRequestTaskIds[storyboardEditorCell.pendingRequestId])
+                        }
+                      >
+                        <span>
+                          {storyboardEditorCell.pendingRequestId &&
+                          cancellingRequestTaskIds[storyboardEditorCell.pendingRequestId]
+                            ? "取消中..."
+                            : "取消当前任务"}
+                        </span>
+                      </button>
+                    )
+                  ) : null}
                   {isStoryboardEditorGenerateMode ? (
                     <button
                       type="button"

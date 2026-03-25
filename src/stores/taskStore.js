@@ -39,6 +39,7 @@ export function normalizeRequestTaskStatus(value) {
     normalizedValue === "accepted" ||
     normalizedValue === "processing" ||
     normalizedValue === "saving" ||
+    normalizedValue === "cancelled" ||
     normalizedValue === "succeeded" ||
     normalizedValue === "recovered" ||
     normalizedValue === "failed"
@@ -53,6 +54,10 @@ function resolveRequestTaskStatus(value = {}) {
   const explicitStatus = normalizeTextValue(value?.status);
   const stage = normalizeTextValue(value?.stage);
   const error = normalizeTextValue(value?.error);
+
+  if (explicitStatus === "cancelled" || stage === "cancelled") {
+    return "cancelled";
+  }
 
   if (explicitStatus === "failed" || stage === "error" || stage === "stale") {
     return "failed";
@@ -135,6 +140,7 @@ export function normalizeRequestTask(value) {
 
 export function isRequestTaskTerminal(task) {
   return (
+    task?.status === "cancelled" ||
     task?.status === "succeeded" ||
     task?.status === "recovered" ||
     task?.status === "failed"
@@ -233,6 +239,7 @@ export const useTaskStore = create((set) => ({
   requestTasks: readStoredRequestTasks(),
   taskManagerOpen: false,
   retryingRequestTaskIds: {},
+  cancellingRequestTaskIds: {},
   setTaskManagerOpen(open) {
     set({ taskManagerOpen: Boolean(open) });
   },
@@ -328,6 +335,32 @@ export const useTaskStore = create((set) => ({
 
       return {
         retryingRequestTaskIds: nextRetryingRequestTaskIds,
+      };
+    });
+  },
+  startCancellingRequestTask(requestId) {
+    if (!requestId) {
+      return;
+    }
+
+    set((state) => ({
+      cancellingRequestTaskIds: {
+        ...state.cancellingRequestTaskIds,
+        [requestId]: true,
+      },
+    }));
+  },
+  finishCancellingRequestTask(requestId) {
+    if (!requestId) {
+      return;
+    }
+
+    set((state) => {
+      const nextCancellingRequestTaskIds = { ...state.cancellingRequestTaskIds };
+      delete nextCancellingRequestTaskIds[requestId];
+
+      return {
+        cancellingRequestTaskIds: nextCancellingRequestTaskIds,
       };
     });
   },

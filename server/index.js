@@ -302,6 +302,10 @@ function sanitizeReferenceImages(input) {
     const mimeType = typeof image?.mimeType === "string" ? image.mimeType.trim() : "";
     const data = typeof image?.data === "string" ? image.data.trim() : "";
     const name = typeof image?.name === "string" ? image.name.trim() : `reference-${index + 1}`;
+    const role =
+      typeof image?.role === "string" && image.role.trim().toLowerCase() === "style"
+        ? "style"
+        : "content";
 
     if (!mimeType.startsWith("image/")) {
       throw new Error(`第 ${index + 1} 张参考图格式不正确`);
@@ -317,7 +321,7 @@ function sanitizeReferenceImages(input) {
       throw new Error(`第 ${index + 1} 张参考图过大，请控制在 7MB 以内`);
     }
 
-    return { mimeType, data, name };
+    return { mimeType, data, name, role };
   });
 }
 
@@ -832,17 +836,59 @@ function registerGoogleRateLimit(retryDelayMs = 0) {
   scheduleGoogleQueuePump(cooldownMs);
 }
 
-function enqueueGoogleRequest({ requestId, requestType, onEvent, run }) {
+function enqueueGoogleRequest({ requestId, requestType, onEvent, run, signal }) {
   return new Promise((resolve, reject) => {
+    let cleanedUp = false;
+
+    function cleanupAbortListener() {
+      if (cleanedUp) {
+        return;
+      }
+
+      cleanedUp = true;
+      signal?.removeEventListener("abort", handleAbort);
+    }
+
+    function finalizeResolve(value) {
+      cleanupAbortListener();
+      resolve(value);
+    }
+
+    function finalizeReject(error) {
+      cleanupAbortListener();
+      reject(error);
+    }
+
     const job = {
       id: `${requestId}:${requestType}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
       requestId,
       requestType,
       onEvent,
       run,
-      resolve,
-      reject,
+      resolve: finalizeResolve,
+      reject: finalizeReject,
     };
+
+    function handleAbort() {
+      const jobIndex = googleQueuePendingJobs.findIndex((pendingJob) => pendingJob.id === job.id);
+
+      if (jobIndex !== -1) {
+        googleQueuePendingJobs.splice(jobIndex, 1);
+        notifyPendingGoogleQueueJobs();
+      }
+
+      cleanupAbortListener();
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("请求已取消"));
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        handleAbort();
+        return;
+      }
+
+      signal.addEventListener("abort", handleAbort, { once: true });
+    }
 
     googleQueuePendingJobs.push(job);
     notifyPendingGoogleQueueJobs();
@@ -931,6 +977,21 @@ function getRequestStatePath(requestId) {
 }
 
 const taskStatusSubscribers = new Map();
+const activeRequestControllers = new Map();
+
+function createRequestCancelledError() {
+  const error = new Error("任务已取消");
+  error.code = "BANANA_TASK_CANCELLED";
+  return error;
+}
+
+function isRequestCancelledError(error) {
+  return (
+    error?.code === "BANANA_TASK_CANCELLED" ||
+    normalizePrompt(error?.message) === "任务已取消" ||
+    normalizePrompt(error?.message) === "请求已取消"
+  );
+}
 
 async function readRequestState(requestId) {
   try {
@@ -1019,6 +1080,51 @@ function notifyTaskStatusSubscribers(requestId, requestState) {
       // Ignore broken subscribers; the response close handler will detach them.
     }
   });
+}
+
+function registerActiveRequestController({
+  requestId,
+  abortController,
+  pwName = "",
+  type = "generation",
+  mode = "professional",
+  route = "",
+}) {
+  if (!requestId || !abortController) {
+    return () => {};
+  }
+
+  activeRequestControllers.set(requestId, {
+    abortController,
+    pwName,
+    type,
+    mode,
+    route,
+  });
+
+  return () => {
+    const currentEntry = activeRequestControllers.get(requestId);
+
+    if (currentEntry?.abortController === abortController) {
+      activeRequestControllers.delete(requestId);
+    }
+  };
+}
+
+function buildCancelledRequestStatePatch(currentState = {}) {
+  return {
+    ...currentState,
+    status: "cancelled",
+    stage: "cancelled",
+    message: "任务已取消",
+    error: "",
+    queuePosition: 0,
+    queueActiveCount: 0,
+    queuePendingCount: 0,
+    queueConcurrency: 0,
+    queueRateLimitWaitMs: 0,
+    queueRateLimitedUntil: "",
+  };
 }
 
 async function writeRequestState(requestId, payload) {
@@ -1472,9 +1578,23 @@ function buildGeminiPrompt({
   hasLayoutGuideImage,
   additionalInstructions = [],
 }) {
+  const styleReferenceImages = referenceImages.filter((image) => image?.role === "style");
+  const contentReferenceImages = referenceImages.filter((image) => image?.role !== "style");
   const referenceHint =
     referenceImages.length > 0
-      ? `Use the uploaded reference images as visual guidance. Preserve important subject cues when it helps the request. The reference images are numbered in upload order. If the user mentions 图1, 图2, 1号图, 2号图, #1, or #2, map those references to the matching numbered image.`
+      ? [
+          styleReferenceImages.length > 0
+            ? `Style-only reference images: ${styleReferenceImages.length}. Use them only for art style, brushwork, rendering treatment, palette, texture, lighting mood, and overall visual atmosphere. Do not copy their characters, objects, composition, camera angle, pose, or scene layout unless the user explicitly asks to inherit those from the style reference.`
+            : "No style-only reference images were supplied.",
+          contentReferenceImages.length > 0
+            ? `Content reference images: ${contentReferenceImages.length}. Use them for subject identity, props, costume details, composition clues, pose, shot framing, scene elements, and other concrete visual content when relevant to the request. If the user mentions 图1, 图2, 1号图, 2号图, #1, or #2, map those mentions to the content reference images in content-reference order, not counting style-only reference images.`
+            : "No content reference images were supplied.",
+          styleReferenceImages.length > 0 && contentReferenceImages.length > 0
+            ? "When both style and content reference images are present, prioritize style references for style only and content references for concrete scene content. Never let a style reference override a content reference for subject identity or composition."
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
       : prompt
         ? "No reference images were supplied, so compose the scene from the text request alone."
         : "No reference images were supplied.";
@@ -1649,7 +1769,10 @@ async function executeGoogleImageGeneration({
             : []),
           ...referenceImages.flatMap((image, index) => [
             {
-              text: `Reference image #${index + 1}. Uploaded filename: ${image.name}.`,
+              text:
+                image?.role === "style"
+                  ? `Style reference image #${index + 1}. Uploaded filename: ${image.name}. Use this image for style only, not for subject identity or composition unless the user explicitly requests that.`
+                  : `Content reference image #${index + 1}. Uploaded filename: ${image.name}. Use this image as concrete content guidance when the user refers to a reference image.`,
             },
             {
               inlineData: {
@@ -1992,6 +2115,7 @@ async function generateImageWithGemini({
     requestId,
     requestType,
     onEvent,
+    signal,
     run: () =>
       executeGoogleImageGeneration({
         requestId,
@@ -2805,6 +2929,14 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
     prepareSseResponse(response);
     const abortController = new AbortController();
     const requestId = resolveRequestId(request.body?.clientRequestId);
+    const unregisterActiveRequestController = registerActiveRequestController({
+      requestId,
+      abortController,
+      pwName: request.accessPayload?.pwName || "",
+      type: "generation",
+      mode,
+      route,
+    });
     const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
     let closed = false;
     let consumedQuotaAmount = 0;
@@ -3083,32 +3215,57 @@ function createGenerateStreamHandler({ route, mode = "professional" }) {
         }
       }
 
-      const message = error instanceof Error ? error.message : "banana 生图失败";
+      if (isRequestCancelledError(error)) {
+        await writeRequestState(requestId, {
+          createdAt,
+          type: "generation",
+          route,
+          mode,
+          pwName: request.accessPayload?.pwName || "",
+          bananaModelId: requestPayload?.modelId || "",
+          imageOptions: requestPayload?.imageOptions || null,
+          requestPayload,
+          ...buildCancelledRequestStatePatch(),
+        });
 
-      await writeRequestState(requestId, {
-        createdAt,
-        type: "generation",
-        route,
-        mode,
-        pwName: request.accessPayload?.pwName || "",
-        status: "failed",
-        stage: "error",
-        message,
-        error: message,
-        requestPayload,
-      });
+        await logBackend("info", "Generate stream request cancelled", {
+          requestId,
+          route,
+          mode,
+        });
 
-      await logBackend("error", "Generate stream request failed", {
-        requestId,
-        route,
-        mode,
-        error,
-      });
+        if (!closed) {
+          writeSseEvent(response, "error", { error: "任务已取消" });
+        }
+      } else {
+        const message = error instanceof Error ? error.message : "banana 生图失败";
 
-      if (!closed) {
-        writeSseEvent(response, "error", { error: message });
+        await writeRequestState(requestId, {
+          createdAt,
+          type: "generation",
+          route,
+          mode,
+          pwName: request.accessPayload?.pwName || "",
+          status: "failed",
+          stage: "error",
+          message,
+          error: message,
+          requestPayload,
+        });
+
+        await logBackend("error", "Generate stream request failed", {
+          requestId,
+          route,
+          mode,
+          error,
+        });
+
+        if (!closed) {
+          writeSseEvent(response, "error", { error: message });
+        }
       }
     } finally {
+      unregisterActiveRequestController();
       clearInterval(heartbeatTimer);
       if (!closed) {
         response.end();
@@ -3503,10 +3660,88 @@ app.post("/api/generations/:requestId/retry", ensureAuthenticated, async (reques
   }
 });
 
+app.post("/api/generations/:requestId/cancel", ensureAuthenticated, async (request, response) => {
+  try {
+    const requestId = sanitizeClientRequestId(request.params.requestId);
+
+    if (!requestId) {
+      response.status(400).json({ error: "缺少有效的请求 ID" });
+      return;
+    }
+
+    const requestState = await readRequestState(requestId);
+    const activeRequest = activeRequestControllers.get(requestId) || null;
+    const requestPwName = requestState?.pwName || activeRequest?.pwName || "";
+
+    if (
+      requestPwName &&
+      request.accessPayload?.pwName &&
+      requestPwName !== request.accessPayload.pwName
+    ) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    if (!requestState && !activeRequest) {
+      response.status(404).json({ error: "没有找到对应的请求记录" });
+      return;
+    }
+
+    if (
+      requestState &&
+      (requestState.status === "succeeded" ||
+        requestState.status === "recovered" ||
+        requestState.status === "failed" ||
+        requestState.status === "cancelled")
+    ) {
+      response.status(409).json({
+        error:
+          requestState.status === "cancelled" ? "任务已经取消" : "任务已结束，无法取消",
+        requestId,
+        status: requestState.status,
+      });
+      return;
+    }
+
+    activeRequest?.abortController?.abort(createRequestCancelledError());
+
+    if (requestState) {
+      await writeRequestState(
+        requestId,
+        buildCancelledRequestStatePatch({
+          ...requestState,
+          pwName: requestPwName,
+        }),
+      );
+    }
+
+    response.json({
+      ok: true,
+      requestId,
+      status: "cancelled",
+      stage: "cancelled",
+      message: "任务已取消",
+      canRetry: Boolean(requestState?.requestPayload),
+    });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : "取消任务失败",
+    });
+  }
+});
+
 app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) => {
   prepareSseResponse(response);
   const abortController = new AbortController();
   const requestId = resolveRequestId(request.body?.clientRequestId);
+  const unregisterActiveRequestController = registerActiveRequestController({
+    requestId,
+    abortController,
+    pwName: request.accessPayload?.pwName || "",
+    type: "enhance",
+    mode: "enhance",
+    route: "/api/enhance/stream",
+  });
   const heartbeatTimer = startSseHeartbeat(response, () => ({ requestId }));
   let closed = false;
   let consumedQuotaAmount = 0;
@@ -3762,31 +3997,55 @@ app.post("/api/enhance/stream", ensureAuthenticated, async (request, response) =
       }
     }
 
-    const message = error instanceof Error ? error.message : "提升清晰度失败";
+    if (isRequestCancelledError(error)) {
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "enhance",
+        route: "/api/enhance/stream",
+        mode: "enhance",
+        pwName: request.accessPayload?.pwName || "",
+        bananaModelId: requestPayload?.modelId || "",
+        imageOptions: requestPayload?.imageOptions || null,
+        requestPayload,
+        ...buildCancelledRequestStatePatch(),
+      });
 
-    await writeRequestState(requestId, {
-      createdAt,
-      type: "enhance",
-      route: "/api/enhance/stream",
-      mode: "enhance",
-      pwName: request.accessPayload?.pwName || "",
-      status: "failed",
-      stage: "error",
-      message,
-      error: message,
-      requestPayload,
-    });
+      await logBackend("info", "Enhance stream request cancelled", {
+        requestId,
+        route: "/api/enhance/stream",
+      });
 
-    await logBackend("error", "Enhance stream request failed", {
-      requestId,
-      route: "/api/enhance/stream",
-      error,
-    });
+      if (!closed) {
+        writeSseEvent(response, "error", { error: "任务已取消" });
+      }
+    } else {
+      const message = error instanceof Error ? error.message : "提升清晰度失败";
 
-    if (!closed) {
-      writeSseEvent(response, "error", { error: message });
+      await writeRequestState(requestId, {
+        createdAt,
+        type: "enhance",
+        route: "/api/enhance/stream",
+        mode: "enhance",
+        pwName: request.accessPayload?.pwName || "",
+        status: "failed",
+        stage: "error",
+        message,
+        error: message,
+        requestPayload,
+      });
+
+      await logBackend("error", "Enhance stream request failed", {
+        requestId,
+        route: "/api/enhance/stream",
+        error,
+      });
+
+      if (!closed) {
+        writeSseEvent(response, "error", { error: message });
+      }
     }
   } finally {
+    unregisterActiveRequestController();
     clearInterval(heartbeatTimer);
     if (!closed) {
       response.end();

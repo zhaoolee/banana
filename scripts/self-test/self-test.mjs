@@ -392,6 +392,89 @@ async function runProfessionalSceneTransferSmoke(browser, baseURL) {
   });
 }
 
+async function runTaskCancelSmoke(browser, baseURL) {
+  await runCase("request task cancel from storyboard and task manager", async () => {
+    await withMockedPage(browser, baseURL, async (page) => {
+      let cancelRequestCount = 0;
+
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "banana.requestTasks",
+          JSON.stringify([
+            {
+              requestId: "cancelstory01",
+              type: "storyboard",
+              mode: "professional",
+              canRetry: true,
+              promptSnapshot: "分镜取消测试",
+              storyboardCellId: "storyboard-cell-1-1",
+              storyboardCellLabel: "第 1 格",
+              storyboardCellCoordinate: "行 1 / 列 1",
+              createdAt: "2026-03-25T10:00:00.000Z",
+              updatedAt: "2026-03-25T10:00:00.000Z",
+              status: "accepted",
+              stage: "accepted",
+              message: "第 1 格 请求已提交，等待后端接收...",
+            },
+            {
+              requestId: "canceltask02",
+              type: "generation",
+              mode: "professional",
+              canRetry: true,
+              promptSnapshot: "列表取消测试",
+              createdAt: "2026-03-25T10:01:00.000Z",
+              updatedAt: "2026-03-25T10:01:00.000Z",
+              status: "processing",
+              stage: "processing",
+              message: "正在生成图片...",
+            },
+          ]),
+        );
+      });
+
+      await page.route("**/api/generations/*/cancel", async (route) => {
+        cancelRequestCount += 1;
+        await fulfillJson(route, {
+          ok: true,
+          requestId: "mock-cancelled",
+          status: "cancelled",
+          stage: "cancelled",
+          message: "任务已取消",
+        });
+      });
+
+      await page.goto("/login?e2e=1", {
+        waitUntil: "domcontentloaded",
+      });
+      await page.getByRole("heading", { name: "专业模式导出预览" }).waitFor();
+
+      await page.locator('.storyboard-cell[aria-label^="第 1 格"]').click();
+      await page.getByRole("dialog", { name: "第 1 格 输入面板" }).waitFor();
+      await page.getByRole("button", { name: "取消当前任务" }).click();
+      await page.getByRole("button", { name: "确认取消任务" }).waitFor();
+      await page.getByRole("button", { name: "放弃取消任务" }).click();
+      assert.equal(await page.getByRole("button", { name: "取消当前任务" }).count(), 1);
+
+      await page.getByRole("button", { name: "取消当前任务" }).click();
+      await page.getByRole("button", { name: "确认取消任务" }).click();
+      await page.locator(".storyboard-editor-status").getByText("任务已取消").waitFor();
+      assert.equal(await page.getByRole("button", { name: "取消当前任务" }).count(), 0);
+      await page.getByRole("button", { name: "关闭输入面板" }).click();
+
+      await page.getByRole("button", { name: /打开任务列表/ }).click();
+      await page.getByRole("dialog", { name: "任务列表" }).waitFor();
+      const activeTaskCard = page.locator(".task-manager-item").filter({
+        hasText: "ID cancelta",
+      });
+      await activeTaskCard.getByRole("button", { name: "取消任务" }).click();
+      await activeTaskCard.getByRole("button", { name: "确认取消任务" }).click();
+      await activeTaskCard.locator(".task-manager-status-badge.is-cancelled").waitFor();
+
+      assert.equal(cancelRequestCount, 2);
+    });
+  });
+}
+
 async function main() {
   const downloadDir = await mkdtemp(path.join(os.tmpdir(), "banana-self-test-"));
   let appServer = null;
@@ -416,6 +499,7 @@ async function main() {
 
     await runRootRedirectSmoke(browser, baseURL);
     await runProfessionalSceneTransferSmoke(browser, baseURL);
+    await runTaskCancelSmoke(browser, baseURL);
 
     log("All self-tests passed");
   } catch (error) {

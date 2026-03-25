@@ -1275,6 +1275,12 @@ textarea:focus {
   stroke-linejoin: round;
 }
 
+.inline-confirm-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+}
+
 .layout-preview-square {
   width: min(100%, 340px);
   margin: 2px auto 0;
@@ -2333,6 +2339,10 @@ textarea:focus {
   background: linear-gradient(180deg, rgba(255, 239, 233, 0.94), rgba(255, 248, 245, 0.9));
 }
 
+.task-manager-item.is-cancelled {
+  background: linear-gradient(180deg, rgba(242, 245, 249, 0.96), rgba(252, 252, 250, 0.92));
+}
+
 .task-manager-item.is-recovered,
 .task-manager-item.is-succeeded {
   background: linear-gradient(180deg, rgba(246, 255, 235, 0.94), rgba(255, 252, 243, 0.92));
@@ -2393,6 +2403,10 @@ textarea:focus {
   background: linear-gradient(180deg, rgba(205, 239, 167, 0.94), rgba(157, 205, 104, 0.88));
 }
 
+.task-manager-status-badge.is-cancelled {
+  background: linear-gradient(180deg, rgba(226, 232, 240, 0.96), rgba(192, 201, 214, 0.88));
+}
+
 .task-manager-status-badge.is-failed {
   background: linear-gradient(180deg, rgba(255, 203, 184, 0.96), rgba(236, 124, 95, 0.88));
 }
@@ -2410,6 +2424,7 @@ textarea:focus {
 .task-manager-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
 }
 
 .task-manager-clear-button,
