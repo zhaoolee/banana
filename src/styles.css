@@ -157,17 +157,15 @@ code {
 }
 
 .gate-panel {
-  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
+  gap: 20px;
 }
 
 .gate-panel-logo {
-  position: absolute;
-  top: 24px;
-  left: 24px;
-  z-index: 1;
+  position: static;
+  align-self: flex-start;
   width: 56px;
   height: 56px;
   border-radius: 14px;
@@ -261,6 +259,12 @@ h2 {
 .gate-form {
   display: grid;
   gap: 14px;
+  width: 100%;
+  min-width: 0;
+}
+
+.gate-form > * {
+  min-width: 0;
 }
 
 .gate-form label,
@@ -293,6 +297,8 @@ textarea,
 .gate-form input,
 .model-selector,
 textarea {
+  width: 100%;
+  max-width: 100%;
   border-radius: 20px;
   padding: 16px 18px;
   color: var(--ink);
@@ -317,6 +323,8 @@ textarea:focus {
 
 .gate-form button,
 .primary-button {
+  width: 100%;
+  max-width: 100%;
   border: 0;
   border-radius: 999px;
   padding: 16px 18px;
@@ -351,6 +359,7 @@ textarea:focus {
 
 .panel-note {
   margin-top: 18px;
+  overflow-wrap: anywhere;
 }
 
 .panel-note strong {
