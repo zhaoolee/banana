@@ -221,8 +221,46 @@ const EXAMPLE_SCENE_OPTION_MAP = new Map(
   EXAMPLE_SCENE_OPTIONS.map((option) => [option.value, option]),
 );
 
+function resolveInitialProfessionalSceneState() {
+  const customScenarios = readStoredProfessionalCustomScenarios();
+  const canvasSize = normalizeCanvasScenarioValue(
+    readLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY) ||
+      resolveCanvasSizeFromLegacyAspectRatio(
+        readLocalValue(LEGACY_SELECTED_ASPECT_RATIO_STORAGE_KEY) || "1:1",
+      ),
+    customScenarios,
+  );
+
+  if (canvasSize === CUSTOM_CANVAS_SIZE_VALUE) {
+    return {
+      customScenarios,
+      canvasSize,
+      layoutRows: clampLayoutTrack(
+        readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
+          readLocalValue(LEGACY_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
+          1,
+      ),
+      layoutColumns: clampLayoutTrack(
+        readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
+          readLocalValue(LEGACY_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
+          1,
+      ),
+    };
+  }
+
+  const scenario = getCanvasScenarioOption(canvasSize, customScenarios);
+
+  return {
+    customScenarios,
+    canvasSize: scenario.value,
+    layoutRows: clampLayoutTrack(scenario.layoutRows),
+    layoutColumns: clampLayoutTrack(scenario.layoutColumns),
+  };
+}
+
 function BananaStudioApp({ routeMode = "login" }) {
   useDevRenderMetric("BananaStudioApp", routeMode);
+  const initialProfessionalSceneState = resolveInitialProfessionalSceneState();
 
   const urlPassword = normalizeTextValue(readSearchParam("pw"));
   const isE2eStudioMode =
@@ -247,31 +285,17 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [professionalGlobalPrompt, setProfessionalGlobalPrompt] = useState(() =>
     readLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY),
   );
-  const [professionalCustomScenarios, setProfessionalCustomScenarios] = useState(() =>
-    readStoredProfessionalCustomScenarios(),
+  const [professionalCustomScenarios, setProfessionalCustomScenarios] = useState(
+    () => initialProfessionalSceneState.customScenarios,
   );
-  const [professionalCanvasSize, setProfessionalCanvasSize] = useState(() =>
-    normalizeCanvasScenarioValue(
-      readLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY) ||
-        resolveCanvasSizeFromLegacyAspectRatio(
-          readLocalValue(LEGACY_SELECTED_ASPECT_RATIO_STORAGE_KEY) || "1:1",
-        ),
-      readStoredProfessionalCustomScenarios(),
-    ),
+  const [professionalCanvasSize, setProfessionalCanvasSize] = useState(
+    () => initialProfessionalSceneState.canvasSize,
   );
-  const [professionalLayoutRows, setProfessionalLayoutRows] = useState(() =>
-    clampLayoutTrack(
-      readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
-        readLocalValue(LEGACY_SELECTED_LAYOUT_ROWS_STORAGE_KEY) ||
-        1,
-    ),
+  const [professionalLayoutRows, setProfessionalLayoutRows] = useState(
+    () => initialProfessionalSceneState.layoutRows,
   );
-  const [professionalLayoutColumns, setProfessionalLayoutColumns] = useState(() =>
-    clampLayoutTrack(
-      readLocalValue(PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
-        readLocalValue(LEGACY_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY) ||
-        1,
-    ),
+  const [professionalLayoutColumns, setProfessionalLayoutColumns] = useState(
+    () => initialProfessionalSceneState.layoutColumns,
   );
   const [professionalStoryboardAspectRatio, setProfessionalStoryboardAspectRatio] = useState(() =>
     normalizeAspectRatioValue(
@@ -382,6 +406,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [storyboardImageControlsCollapsed, setStoryboardImageControlsCollapsed] = useState(true);
   const [storyboardStyleControlsCollapsed, setStoryboardStyleControlsCollapsed] = useState(true);
   const [storyboardCellsHydrated, setStoryboardCellsHydrated] = useState(false);
+  const [storyboardTaskStateReady, setStoryboardTaskStateReady] = useState(false);
   const [activeStoryboardDragId, setActiveStoryboardDragId] = useState("");
   const [isMobilePerformanceMode, setIsMobilePerformanceMode] = useState(() =>
     detectMobilePerformanceMode(),
@@ -1236,6 +1261,7 @@ function BananaStudioApp({ routeMode = "login" }) {
         if (!cancelled) {
           setSimpleReferenceImagesHydrated(true);
           setReferenceImagesHydrated(true);
+          setStoryboardTaskStateReady(false);
           setStoryboardCellsHydrated(true);
         }
       }
@@ -1247,6 +1273,23 @@ function BananaStudioApp({ routeMode = "login" }) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!storyboardCellsHydrated) {
+      setStoryboardTaskStateReady(false);
+      return;
+    }
+
+    setStoryboardTaskStateReady(false);
+
+    const timeoutId = window.setTimeout(() => {
+      setStoryboardTaskStateReady(true);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [requestTasks, storyboardCellsHydrated]);
 
   useEffect(() => {
     if (backendRequestCount !== 0 || !backendBusyLabel) {
@@ -1678,6 +1721,18 @@ function BananaStudioApp({ routeMode = "login" }) {
       Object.fromEntries(
         storyboardCellDefinitions.map((definition) => {
           const baseCell = storyboardCells[definition.id] || createStoryboardCellState(definition);
+          const sanitizedBaseCell = {
+            ...baseCell,
+            pendingRequestId: "",
+            status: baseCell.record ? "success" : "idle",
+            statusText: "",
+            error: "",
+          };
+
+          if (!storyboardTaskStateReady) {
+            return [definition.id, sanitizedBaseCell];
+          }
+
           const task = latestStoryboardTaskByCellId.get(definition.id);
 
           if (task) {
@@ -1695,22 +1750,18 @@ function BananaStudioApp({ routeMode = "login" }) {
           }
 
           if (baseCell.status === "loading") {
-            return [
-              definition.id,
-              {
-                ...baseCell,
-                pendingRequestId: "",
-                status: baseCell.record ? "success" : "idle",
-                statusText: "",
-                error: "",
-              },
-            ];
+            return [definition.id, sanitizedBaseCell];
           }
 
           return [definition.id, baseCell];
         }),
       ),
-    [latestStoryboardTaskByCellId, storyboardCellDefinitions, storyboardCells],
+    [
+      latestStoryboardTaskByCellId,
+      storyboardCellDefinitions,
+      storyboardCells,
+      storyboardTaskStateReady,
+    ],
   );
   const storyboardEditorCell = storyboardEditorCellId
     ? storyboardRuntimeCells[storyboardEditorCellId] || null
@@ -1917,7 +1968,10 @@ function BananaStudioApp({ routeMode = "login" }) {
         professionalCustomScenarios,
       ) !== professionalCanvasSize
     ) {
-      setProfessionalCanvasSize(CANVAS_SIZE_OPTIONS[0].value);
+      const fallbackScenario = CANVAS_SIZE_OPTIONS[0];
+      setProfessionalCanvasSize(fallbackScenario.value);
+      setProfessionalLayoutRows(clampLayoutTrack(fallbackScenario.layoutRows));
+      setProfessionalLayoutColumns(clampLayoutTrack(fallbackScenario.layoutColumns));
       return;
     }
 
@@ -2789,6 +2843,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     setReferenceImages(sceneState.referenceImages);
     setReferenceImagesHydrated(true);
     setStoryboardCells(sceneState.storyboardCells);
+    setStoryboardTaskStateReady(false);
     setStoryboardCellsHydrated(true);
     setPromptMode("simple");
     setStoryboardImageControlsCollapsed(true);
