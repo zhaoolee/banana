@@ -879,7 +879,6 @@ export function buildPersistedStoryboardCells(cells) {
       {
         prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
         caption: typeof cell?.caption === "string" ? cell.caption : "",
-        pendingRequestId: normalizeTextValue(cell?.pendingRequestId),
         referenceImages: Array.isArray(cell?.referenceImages)
           ? cell.referenceImages
               .map(buildPersistedReferenceImage)
@@ -1072,7 +1071,9 @@ export function restorePersistedStoryboardCells(cells) {
           id: cellId,
           prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
           caption: typeof cell?.caption === "string" ? cell.caption : "",
-          pendingRequestId: normalizeTextValue(cell?.pendingRequestId),
+          // `pendingRequestId` is runtime-only. Persisting it causes stale loading states
+          // to come back after refresh or scene import when the task list is already empty.
+          pendingRequestId: "",
           referenceImages: Array.isArray(cell?.referenceImages)
             ? cell.referenceImages
                 .map(restorePersistedReferenceImage)
