@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { appendDevLog, bumpDevMetric } from "../devMetrics.js";
 
 const REQUEST_TASKS_STORAGE_KEY = "banana.requestTasks";
 const LEGACY_PENDING_GENERATION_REQUEST_STORAGE_KEY = "banana.pendingGenerationRequest";
@@ -284,6 +285,14 @@ export const useTaskStore = create((set) => ({
       };
     });
 
+    bumpDevMetric("taskStore:upsertRequestTask");
+    appendDevLog("taskStore:upsertRequestTask", {
+      requestId: normalizedTask.requestId,
+      status: normalizedTask.status,
+      stage: normalizedTask.stage,
+      storyboardCellId: normalizedTask.storyboardCellId,
+    });
+
     return normalizedTask;
   },
   updateRequestTask(requestId, patchValue) {
@@ -311,6 +320,8 @@ export const useTaskStore = create((set) => ({
         requestTasks: writeStoredRequestTasks(nextTasks),
       };
     });
+
+    bumpDevMetric("taskStore:updateRequestTask");
   },
   startRetryingRequestTask(requestId) {
     if (!requestId) {
