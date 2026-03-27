@@ -524,12 +524,6 @@ function BananaStudioApp({ routeMode = "login" }) {
     [professionalCanvasSize],
   );
   const storyboardEditorOpen = Boolean(storyboardEditorCellId);
-  const storyboardEditorCell = storyboardEditorCellId
-    ? storyboardCells[storyboardEditorCellId] || null
-    : null;
-  const activeStoryboardDragCell = activeStoryboardDragId
-    ? storyboardCells[activeStoryboardDragId] || null
-    : null;
   const isStoryboardEditorGenerateMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_GENERATE;
   const isStoryboardEditorAssetMode = storyboardEditorMode === STORYBOARD_EDITOR_MODE_ASSET;
   const rawStoryboardDragSensors = useSensors(
@@ -1652,14 +1646,87 @@ function BananaStudioApp({ routeMode = "login" }) {
   const canApplyRecommendedStoryboardAspectRatio =
     recommendedStoryboardAspectRatio &&
     recommendedStoryboardAspectRatio.option.value !== professionalStoryboardAspectRatioValue;
+  const latestStoryboardTaskByCellId = useMemo(() => {
+    const nextTaskMap = new Map();
+
+    requestTasks.forEach((task) => {
+      const storyboardCellId =
+        normalizeTextValue(task?.storyboardCellId) ||
+        findStoryboardCellIdByPendingRequestId(storyboardCells, task?.requestId);
+
+      if (!storyboardCellId || !storyboardCells[storyboardCellId]) {
+        return;
+      }
+
+      const taskTimeMs =
+        parseRequestTaskTimeMs(task?.updatedAt) || parseRequestTaskTimeMs(task?.createdAt);
+      const currentTask = nextTaskMap.get(storyboardCellId);
+      const currentTaskTimeMs = currentTask
+        ? parseRequestTaskTimeMs(currentTask?.updatedAt) ||
+          parseRequestTaskTimeMs(currentTask?.createdAt)
+        : 0;
+
+      if (!currentTask || taskTimeMs >= currentTaskTimeMs) {
+        nextTaskMap.set(storyboardCellId, task);
+      }
+    });
+
+    return nextTaskMap;
+  }, [requestTasks, storyboardCells]);
+  const storyboardRuntimeCells = useMemo(
+    () =>
+      Object.fromEntries(
+        storyboardCellDefinitions.map((definition) => {
+          const baseCell = storyboardCells[definition.id] || createStoryboardCellState(definition);
+          const task = latestStoryboardTaskByCellId.get(definition.id);
+
+          if (task) {
+            const patch = buildStoryboardCellTaskPatch(task, baseCell);
+
+            return [
+              definition.id,
+              patch
+                ? {
+                    ...baseCell,
+                    ...patch,
+                  }
+                : baseCell,
+            ];
+          }
+
+          if (baseCell.status === "loading") {
+            return [
+              definition.id,
+              {
+                ...baseCell,
+                pendingRequestId: "",
+                status: baseCell.record ? "success" : "idle",
+                statusText: "",
+                error: "",
+              },
+            ];
+          }
+
+          return [definition.id, baseCell];
+        }),
+      ),
+    [latestStoryboardTaskByCellId, storyboardCellDefinitions, storyboardCells],
+  );
+  const storyboardEditorCell = storyboardEditorCellId
+    ? storyboardRuntimeCells[storyboardEditorCellId] || null
+    : null;
+  const activeStoryboardDragCell = activeStoryboardDragId
+    ? storyboardRuntimeCells[activeStoryboardDragId] || null
+    : null;
   const storyboardCellList = useMemo(
     () =>
       storyboardCellDefinitions.map(
-        (definition) => storyboardCells[definition.id] || createStoryboardCellState(definition),
+        (definition) =>
+          storyboardRuntimeCells[definition.id] || createStoryboardCellState(definition),
       ),
     [
       storyboardCellDefinitions,
-      storyboardCells,
+      storyboardRuntimeCells,
     ],
   );
   const storyboardSortableIds = useMemo(
@@ -1691,7 +1758,7 @@ function BananaStudioApp({ routeMode = "login" }) {
       ? storyboardCellList[storyboardEditorCellIndex + 1]
       : null;
   const storyboardCellClearConfirmCell = storyboardCellClearConfirmCellId
-    ? storyboardCells[storyboardCellClearConfirmCellId] || null
+    ? storyboardRuntimeCells[storyboardCellClearConfirmCellId] || null
     : null;
   const requestTaskCancelConfirmTask = requestTaskCancelConfirmId
     ? requestTasks.find((task) => task.requestId === requestTaskCancelConfirmId) || null
@@ -2140,26 +2207,26 @@ function BananaStudioApp({ routeMode = "login" }) {
       return;
     }
 
-    if (storyboardCells[storyboardEditorCellId]) {
+    if (storyboardRuntimeCells[storyboardEditorCellId]) {
       return;
     }
 
     setStoryboardEditorCellId("");
-  }, [storyboardCells, storyboardEditorCellId]);
+  }, [storyboardEditorCellId, storyboardRuntimeCells]);
 
   useEffect(() => {
     if (!storyboardCellClearConfirmCellId) {
       return;
     }
 
-    const targetCell = storyboardCells[storyboardCellClearConfirmCellId];
+    const targetCell = storyboardRuntimeCells[storyboardCellClearConfirmCellId];
 
     if (targetCell && doesStoryboardCellHaveContent(targetCell)) {
       return;
     }
 
     setStoryboardCellClearConfirmCellId("");
-  }, [storyboardCellClearConfirmCellId, storyboardCells]);
+  }, [storyboardCellClearConfirmCellId, storyboardRuntimeCells]);
 
   useEffect(() => {
     setStoryboardLibraryPickerOpen(false);
@@ -3793,7 +3860,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   }
 
   function openStoryboardCellClearConfirm(cellId) {
-    const cell = storyboardCellsRef.current[cellId];
+    const cell = storyboardRuntimeCells[cellId];
 
     if (!cell || cell.status === "loading" || !doesStoryboardCellHaveContent(cell)) {
       return;
@@ -3815,7 +3882,7 @@ function BananaStudioApp({ routeMode = "login" }) {
 
   function handleConfirmClearStoryboardCell() {
     const cellId = storyboardCellClearConfirmCellId;
-    const cell = cellId ? storyboardCells[cellId] : null;
+    const cell = cellId ? storyboardRuntimeCells[cellId] : null;
 
     if (!cell || cell.status === "loading") {
       closeStoryboardCellClearConfirm();
