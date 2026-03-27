@@ -1997,7 +1997,36 @@ function BananaStudioApp({ routeMode = "login" }) {
     bumpDevMetric("effect:storyboardRequestTaskSyncRuns");
 
     setStoryboardCells((currentValue) => {
+      const requestTaskIdSet = new Set(
+        requestTasks
+          .map((task) => normalizeTextValue(task?.requestId))
+          .filter(Boolean),
+      );
       const latestStoryboardTaskByCellId = new Map();
+      let hasChanges = false;
+      const nextValue = { ...currentValue };
+
+      Object.entries(currentValue).forEach(([cellId, currentCell]) => {
+        if (currentCell?.status !== "loading") {
+          return;
+        }
+
+        const pendingRequestId = normalizeTextValue(currentCell?.pendingRequestId);
+
+        if (pendingRequestId && requestTaskIdSet.has(pendingRequestId)) {
+          return;
+        }
+
+        nextValue[cellId] = {
+          ...currentCell,
+          pendingRequestId: "",
+          status: currentCell?.record ? "success" : "idle",
+          statusText: "",
+          error: "",
+        };
+        hasChanges = true;
+        bumpDevMetric("effect:storyboardRequestTaskOrphanedCellsCleared");
+      });
 
       requestTasks.forEach((task) => {
         const storyboardCellId =
@@ -2021,15 +2050,8 @@ function BananaStudioApp({ routeMode = "login" }) {
         }
       });
 
-      if (latestStoryboardTaskByCellId.size === 0) {
-        return currentValue;
-      }
-
-      let hasChanges = false;
-      const nextValue = { ...currentValue };
-
       latestStoryboardTaskByCellId.forEach((task, cellId) => {
-        const currentCell = currentValue[cellId];
+        const currentCell = nextValue[cellId];
 
         if (!currentCell) {
           return;
@@ -2049,7 +2071,8 @@ function BananaStudioApp({ routeMode = "login" }) {
         if (
           nextCell.status !== currentCell.status ||
           nextCell.statusText !== currentCell.statusText ||
-          nextCell.error !== currentCell.error
+          nextCell.error !== currentCell.error ||
+          nextCell.pendingRequestId !== currentCell.pendingRequestId
         ) {
           nextValue[cellId] = nextCell;
           hasChanges = true;
