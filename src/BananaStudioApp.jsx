@@ -190,6 +190,37 @@ import {
   saveBlobFile,
 } from "./bananaStudioShared.jsx";
 
+const EXAMPLE_SCENE_VALUE_PREFIX = "example-scene:";
+const exampleSceneAssetModules = import.meta.glob("../public/example/*.json", {
+  eager: true,
+  query: "?url",
+  import: "default",
+});
+const EXAMPLE_SCENE_OPTIONS = Object.entries(exampleSceneAssetModules)
+  .map(([path, assetUrl]) => {
+    const filename = path.split("/").pop() || "";
+    const label = filename.replace(/\.json$/i, "");
+
+    if (!filename || !label || typeof assetUrl !== "string") {
+      return null;
+    }
+
+    return {
+      value: `${EXAMPLE_SCENE_VALUE_PREFIX}${filename}`,
+      label: `示例 · ${label}`,
+      sceneLabel: label,
+      filename,
+      assetUrl,
+    };
+  })
+  .filter(Boolean)
+  .sort((leftOption, rightOption) =>
+    leftOption.sceneLabel.localeCompare(rightOption.sceneLabel, "zh-Hans-CN"),
+  );
+const EXAMPLE_SCENE_OPTION_MAP = new Map(
+  EXAMPLE_SCENE_OPTIONS.map((option) => [option.value, option]),
+);
+
 function BananaStudioApp({ routeMode = "login" }) {
   useDevRenderMetric("BananaStudioApp", routeMode);
 
@@ -278,6 +309,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [studioPending, setStudioPending] = useState(false);
   const [professionalExportPending, setProfessionalExportPending] = useState(false);
   const [professionalSceneTransferPending, setProfessionalSceneTransferPending] = useState(false);
+  const [exampleSceneLoadingLabel, setExampleSceneLoadingLabel] = useState("");
   const [professionalSceneExportDialog, setProfessionalSceneExportDialog] = useState(null);
   const [enhancePending, setEnhancePending] = useState(false);
   const [backendRequestCount, setBackendRequestCount] = useState(0);
@@ -2884,6 +2916,48 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
   }
 
+  async function importExampleProfessionalScene(optionValue) {
+    const exampleOption = EXAMPLE_SCENE_OPTION_MAP.get(optionValue);
+
+    if (!exampleOption) {
+      return;
+    }
+
+    setProfessionalSceneTransferPending(true);
+    setExampleSceneLoadingLabel(exampleOption.sceneLabel);
+    setStudioError("");
+    setStudioNotice("");
+
+    try {
+      const response = await fetch(exampleOption.assetUrl, {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error(`示例场景读取失败（${response.status}）`);
+      }
+
+      const parsedValue = JSON.parse(await response.text());
+      const sceneState = resolveProfessionalSceneArchiveState(parsedValue);
+      await applyImportedProfessionalScene(sceneState);
+      setStudioNotice(`已导入示例场景：${exampleOption.sceneLabel}`);
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "示例场景导入失败");
+    } finally {
+      setProfessionalSceneTransferPending(false);
+      setExampleSceneLoadingLabel("");
+    }
+  }
+
+  function handleCanvasSizeSelectorChange(value) {
+    if (value.startsWith(EXAMPLE_SCENE_VALUE_PREFIX)) {
+      void importExampleProfessionalScene(value);
+      return;
+    }
+
+    handleProfessionalScenarioChange(value);
+  }
+
   async function appendReferenceFiles(files) {
     try {
       const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -5356,8 +5430,18 @@ function BananaStudioApp({ routeMode = "login" }) {
                           name="canvasSizeSelector"
                           className="model-selector compact-selector scenario-compact-selector"
                           value={professionalCanvasSize}
-                          onChange={(event) => handleProfessionalScenarioChange(event.target.value)}
+                          disabled={professionalSceneTransferPending}
+                          onChange={(event) => handleCanvasSizeSelectorChange(event.target.value)}
                         >
+                          {EXAMPLE_SCENE_OPTIONS.length > 0 ? (
+                            <optgroup label="示例场景">
+                              {EXAMPLE_SCENE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                          ) : null}
                           {allCanvasScenarioOptions.map((option) => (
                             <option key={option.value} value={option.value}>
                               {option.label}
@@ -5370,6 +5454,7 @@ function BananaStudioApp({ routeMode = "login" }) {
                           onClick={openScenarioManager}
                           aria-label="打开常用场景管理面板"
                           title="管理常用场景"
+                          disabled={professionalSceneTransferPending}
                         >
                           <svg viewBox="0 0 20 20" aria-hidden="true">
                             <path d="M4.5 5.5h11" />
@@ -5380,6 +5465,12 @@ function BananaStudioApp({ routeMode = "login" }) {
                           </svg>
                         </button>
                       </div>
+                      {exampleSceneLoadingLabel ? (
+                        <p className="scenario-select-loading" role="status" aria-live="polite">
+                          <span className="scenario-select-loading-spinner" aria-hidden="true" />
+                          <span>正在加载示例场景“{exampleSceneLoadingLabel}”...</span>
+                        </p>
+                      ) : null}
                     </div>
 
                     {isSimplePanelMode ? (

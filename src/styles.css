@@ -877,6 +877,26 @@ textarea:focus {
   stroke-linejoin: round;
 }
 
+.scenario-select-loading {
+  margin: 10px 2px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(117, 98, 70, 0.9);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.scenario-select-loading-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(79, 54, 7, 0.16);
+  border-top-color: rgba(79, 54, 7, 0.82);
+  animation: storyboard-editor-library-spin 0.9s linear infinite;
+}
+
 .image-size-field {
   flex: 0 0 88px;
 }
