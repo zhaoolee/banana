@@ -409,6 +409,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     cellId: "",
     timestamp: 0,
   });
+  const defaultViewportMetaContentRef = useRef("");
   const storyboardCellsRef = useRef(storyboardCells);
   const activeStoryboardDragIdRef = useRef(activeStoryboardDragId);
   const storyboardCellInteractionRef = useRef({
@@ -575,6 +576,36 @@ function BananaStudioApp({ routeMode = "login" }) {
       mediaQuery.removeEventListener("change", handleChange);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    const viewportMeta = document.querySelector('meta[name="viewport"]');
+
+    if (!viewportMeta) {
+      return undefined;
+    }
+
+    if (!defaultViewportMetaContentRef.current) {
+      defaultViewportMetaContentRef.current =
+        viewportMeta.getAttribute("content") || "width=device-width, initial-scale=1.0";
+    }
+
+    const defaultViewportContent = defaultViewportMetaContentRef.current;
+    viewportMeta.setAttribute(
+      "content",
+      isMobilePerformanceMode
+        ? `${defaultViewportContent}, maximum-scale=1, user-scalable=no`
+        : defaultViewportContent,
+    );
+
+    return () => {
+      viewportMeta.setAttribute("content", defaultViewportContent);
+    };
+  }, [isMobilePerformanceMode]);
+
   const storyboardCaptionFontScale = professionalStoryboardCaptionFontSizePercent / 100;
   const storyboardCaptionBackgroundAlpha =
     professionalStoryboardCaptionBackgroundAlphaPercent / 100;
