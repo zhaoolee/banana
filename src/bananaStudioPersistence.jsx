@@ -772,7 +772,7 @@ export function cloneGenerationResultRecord(record) {
   return restorePersistedGenerationResultRecord(buildPersistedGenerationResultRecord(record));
 }
 
-async function copyTextToClipboard(text) {
+export async function copyTextToClipboard(text) {
   if (
     typeof navigator !== "undefined" &&
     navigator.clipboard &&
@@ -1115,7 +1115,7 @@ export async function writePersistedGenerationLibrary(records) {
   await generationResultStorage.removeItem(GENERATION_LIBRARY_RECORDS_KEY);
 }
 
-async function writeLastGenerationRecord(record) {
+export async function writeLastGenerationRecord(record) {
   const persistedRecord = buildPersistedGenerationResultRecord(record);
 
   if (persistedRecord) {
@@ -1126,7 +1126,7 @@ async function writeLastGenerationRecord(record) {
   await generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY);
 }
 
-async function writeLastGenerationRecordId(recordId) {
+export async function writeLastGenerationRecordId(recordId) {
   if (recordId) {
     await generationResultStorage.setItem(LAST_GENERATION_RECORD_ID_KEY, recordId);
     return;

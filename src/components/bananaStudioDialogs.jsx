@@ -258,6 +258,112 @@ function ResourceManagerDialog({
   );
 }
 
+function SettingsDialog({
+  open = false,
+  pendingAction = "",
+  libraryPending = false,
+  onClose,
+  onOpenLibrary,
+  onExportFeedback,
+  onResetPage,
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const feedbackPending = pendingAction === "feedback";
+  const resetPending = pendingAction === "reset";
+  const dialogBusy = Boolean(pendingAction);
+
+  return (
+    <div
+      className="task-manager-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="设置"
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !dialogBusy) {
+          onClose?.();
+        }
+      }}
+    >
+      <section className="task-manager-panel settings-dialog-panel">
+        <div className="scenario-manager-windowbar">
+          <span className="finder-window-spacer" aria-hidden="true" />
+          <strong>设置</strong>
+          <button
+            type="button"
+            className="finder-close-button"
+            onClick={() => onClose?.()}
+            aria-label="关闭设置"
+            title="关闭"
+            disabled={dialogBusy}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M5 5l10 10" />
+              <path d="M15 5L5 15" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="settings-dialog-body">
+          <article className="settings-dialog-card">
+            <div className="settings-dialog-copy">
+              <strong>资源库</strong>
+              <span>查看本地图片资源、筛选结果并进入大图预览。这里是“库”的二级入口。</span>
+            </div>
+            <button
+              type="button"
+              className="ghost-button settings-dialog-action"
+              onClick={() => onOpenLibrary?.()}
+              disabled={dialogBusy || libraryPending}
+            >
+              {libraryPending ? (
+                <>
+                  <span className="settings-dialog-action-spinner" aria-hidden="true" />
+                  <span>正在打开资源库...</span>
+                </>
+              ) : (
+                "打开资源库"
+              )}
+            </button>
+          </article>
+
+          <article className="settings-dialog-card">
+            <div className="settings-dialog-copy">
+              <strong>Feedback</strong>
+              <span>导出当前页面排错包，包含页面状态、任务列表、本地持久化数据和 localStorage 快照。</span>
+            </div>
+            <button
+              type="button"
+              className="ghost-button settings-dialog-action"
+              onClick={() => onExportFeedback?.()}
+              disabled={dialogBusy}
+            >
+              {feedbackPending ? "正在生成反馈包..." : "导出 Feedback ZIP"}
+            </button>
+          </article>
+
+          <article className="settings-dialog-card is-danger">
+            <div className="settings-dialog-copy">
+              <strong>重置页面</strong>
+              <span>清理当前页面相关的本地状态并返回登录页。资源库图片会保留，不会删除。</span>
+            </div>
+            <button
+              type="button"
+              className="ghost-button settings-dialog-action settings-dialog-danger"
+              onClick={() => onResetPage?.()}
+              disabled={dialogBusy}
+            >
+              {resetPending ? "正在重置..." : "重置并返回登录页"}
+            </button>
+          </article>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ImagePreviewDialog({
   open = false,
   previewRecord = null,
@@ -400,4 +506,4 @@ function ImagePreviewDialog({
   );
 }
 
-export { ImagePreviewDialog, ResourceManagerDialog, TaskManagerDialog };
+export { ImagePreviewDialog, ResourceManagerDialog, SettingsDialog, TaskManagerDialog };

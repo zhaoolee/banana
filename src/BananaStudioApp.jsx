@@ -13,6 +13,7 @@ import { getProfessionalExportLayoutMetrics } from "../shared/professionalExport
 import {
   ImagePreviewDialog,
   ResourceManagerDialog,
+  SettingsDialog,
   TaskManagerDialog,
 } from "./components/bananaStudioDialogs.jsx";
 import {
@@ -57,6 +58,11 @@ import {
   PROFESSIONAL_SELECTED_IMAGE_SIZE_STORAGE_KEY,
   PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY,
   SIMPLE_PROMPT_STORAGE_KEY,
+  LAST_GENERATION_RECORD_KEY,
+  LAST_GENERATION_RECORD_ID_KEY,
+  PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY,
+  PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY,
+  SIMPLE_REFERENCE_IMAGES_STORAGE_KEY,
   MAX_REFERENCE_IMAGES,
   REFERENCE_IMAGE_AUTO_OPTIMIZE_TARGET_BYTES,
   PROMPT_TEXTAREA_MIN_ROWS,
@@ -136,6 +142,7 @@ import {
   buildProfessionalSceneArchiveDownloadName,
   buildProfessionalSceneArchiveZipDownloadName,
   buildProfessionalSceneAssetPackage,
+  createStoredZipBlob,
   formatPersistedAt,
   getRequestTaskStatusLabel,
   buildRequestTaskMeta,
@@ -162,6 +169,7 @@ import {
   buildProfessionalExportPayload,
   getNextImageSize,
   cloneGenerationResultRecord,
+  copyTextToClipboard,
   buildGeneratedImageRecords,
   buildGeneratedImageRecord,
   buildProfessionalSceneArchive,
@@ -169,6 +177,8 @@ import {
   readPersistedGenerationLibrary,
   writePersistedGenerationLibrary,
   readPersistedCurrentGenerationRecord,
+  writeLastGenerationRecord,
+  writeLastGenerationRecordId,
   readPersistedStoryboardCells,
   writePersistedStoryboardCells,
   readPersistedReferenceImages,
@@ -188,6 +198,7 @@ import {
   requestEnhancement,
   requestProfessionalExportPreview,
   saveBlobFile,
+  generationResultStorage,
 } from "./bananaStudioShared.jsx";
 
 const EXAMPLE_SCENE_VALUE_PREFIX = "example-scene:";
@@ -220,6 +231,125 @@ const EXAMPLE_SCENE_OPTIONS = Object.entries(exampleSceneAssetModules)
 const EXAMPLE_SCENE_OPTION_MAP = new Map(
   EXAMPLE_SCENE_OPTIONS.map((option) => [option.value, option]),
 );
+
+function buildFeedbackExportBaseName() {
+  const now = new Date();
+  const datePart = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("");
+  const timePart = [
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+  ].join("");
+
+  return `banana-feedback-${datePart}-${timePart}`;
+}
+
+function collectLocalStorageSnapshot() {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.keys(window.localStorage)
+      .sort((leftKey, rightKey) => leftKey.localeCompare(rightKey))
+      .map((key) => [key, window.localStorage.getItem(key)]),
+  );
+}
+
+function buildFeedbackLocationSnapshot() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const currentUrl = new URL(window.location.href);
+  const searchParams = new URLSearchParams(currentUrl.search);
+
+  if (searchParams.has("pw")) {
+    searchParams.set("pw", "[redacted]");
+  }
+
+  return {
+    origin: currentUrl.origin,
+    pathname: currentUrl.pathname,
+    search: searchParams.toString() ? `?${searchParams.toString()}` : "",
+    hash: currentUrl.hash || "",
+    href: `${currentUrl.origin}${currentUrl.pathname}${
+      searchParams.toString() ? `?${searchParams.toString()}` : ""
+    }${currentUrl.hash || ""}`,
+  };
+}
+
+function summarizeGenerationRecord(record) {
+  if (!record) {
+    return null;
+  }
+
+  return {
+    id: record.id || "",
+    persistedAt: record.persistedAt || "",
+    promptSnapshot: record.promptSnapshot || "",
+    bananaModelId: record.bananaModelId || "",
+    aspectRatio: record.aspectRatio || "",
+    imageSize: record.imageSize || "",
+    mimeType: record.mimeType || "",
+    width: record.width || 0,
+    height: record.height || 0,
+    layoutRows: record.layoutRows || 0,
+    layoutColumns: record.layoutColumns || 0,
+    storyboardCellId: record.storyboardCellId || "",
+    storyboardCellLabel: record.storyboardCellLabel || "",
+    downloadName: record.downloadName || "",
+    hasInlineImage: Boolean(record.imageBase64),
+    hasPreviewUrl: Boolean(record.previewUrl),
+  };
+}
+
+function summarizeReferenceImage(image) {
+  if (!image) {
+    return null;
+  }
+
+  return {
+    id: image.id || "",
+    name: image.name || "",
+    mimeType: image.mimeType || "",
+    role: image.role || "",
+    width: image.width || 0,
+    height: image.height || 0,
+    sizeBytes: image.sizeBytes || 0,
+    optimized: Boolean(image.optimized),
+    previewUrl: image.previewUrl ? "[data-url]" : "",
+    hasData: Boolean(image.data),
+  };
+}
+
+function summarizeStoryboardCellsForFeedback(cells) {
+  if (!cells || typeof cells !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(cells).map(([cellId, cell]) => [
+      cellId,
+      {
+        prompt: typeof cell?.prompt === "string" ? cell.prompt : "",
+        caption: typeof cell?.caption === "string" ? cell.caption : "",
+        status: cell?.status || "idle",
+        statusText: typeof cell?.statusText === "string" ? cell.statusText : "",
+        error: typeof cell?.error === "string" ? cell.error : "",
+        pendingRequestId: cell?.pendingRequestId || "",
+        referenceImages: Array.isArray(cell?.referenceImages)
+          ? cell.referenceImages.map(summarizeReferenceImage).filter(Boolean)
+          : [],
+        record: summarizeGenerationRecord(cell?.record),
+      },
+    ]),
+  );
+}
 
 function resolveInitialProfessionalSceneState() {
   const customScenarios = readStoredProfessionalCustomScenarios();
@@ -349,6 +479,9 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [generationLibraryLoaded, setGenerationLibraryLoaded] = useState(false);
   const [resourceManagerPending, setResourceManagerPending] = useState(false);
   const [resourceManagerOpen, setResourceManagerOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [settingsPendingAction, setSettingsPendingAction] = useState("");
+  const [persistenceSuspended, setPersistenceSuspended] = useState(false);
   const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
   const [uploadDragActive, setUploadDragActive] = useState(false);
   const [referenceDragActive, setReferenceDragActive] = useState(false);
@@ -428,6 +561,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   const startCancellingRequestTask = useTaskStore((state) => state.startCancellingRequestTask);
   const finishCancellingRequestTask = useTaskStore((state) => state.finishCancellingRequestTask);
   const clearTerminalRequestTasks = useTaskStore((state) => state.clearTerminalRequestTasks);
+  const commitRequestTasks = useTaskStore((state) => state.commitRequestTasks);
   const layoutCanvasRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const storyboardDragClickSuppressionRef = useRef({
@@ -456,6 +590,7 @@ function BananaStudioApp({ routeMode = "login" }) {
   });
   const generationLibraryLoadPromiseRef = useRef(null);
   const storyboardDragSensorsDebugRef = useRef(null);
+  const persistenceSuspendedRef = useRef(false);
   const taskRecoveryInFlightRequestIdsRef = useRef(new Set());
   const taskStatusStreamHandleRef = useRef(null);
   const taskStatusStreamReconnectTimeoutRef = useRef(0);
@@ -861,6 +996,11 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     abortController.abort(reason);
+  }
+
+  function suspendPersistence() {
+    persistenceSuspendedRef.current = true;
+    setPersistenceSuspended(true);
   }
 
   async function executeRetryPayloadTask(task, retryPayload) {
@@ -1940,28 +2080,44 @@ function BananaStudioApp({ routeMode = "login" }) {
   );
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(PANEL_MODE_STORAGE_KEY, panelMode);
-  }, [panelMode]);
+  }, [panelMode, persistenceSuspended, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(PROFESSIONAL_SELECTED_MODEL_STORAGE_KEY, professionalSelectedModelId);
-  }, [professionalSelectedModelId]);
+  }, [professionalSelectedModelId, persistenceSuspended, routeMode]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (routeMode !== "studio" || persistenceSuspended || typeof window === "undefined") {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
+      if (persistenceSuspendedRef.current) {
+        return;
+      }
+
       writeLocalValue(PROFESSIONAL_GLOBAL_PROMPT_STORAGE_KEY, professionalGlobalPrompt);
     }, PROMPT_STORAGE_WRITE_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [professionalGlobalPrompt]);
+  }, [persistenceSuspended, professionalGlobalPrompt, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     if (
       normalizeCanvasScenarioValue(
         professionalCanvasSize,
@@ -1976,45 +2132,74 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     writeLocalValue(PROFESSIONAL_CANVAS_SIZE_STORAGE_KEY, professionalCanvasSize);
-  }, [professionalCanvasSize, professionalCustomScenarios]);
+  }, [
+    persistenceSuspended,
+    professionalCanvasSize,
+    professionalCustomScenarios,
+    routeMode,
+  ]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     const persistedValue = buildPersistedProfessionalCustomScenarios(professionalCustomScenarios);
     writeLocalValue(
       PROFESSIONAL_CUSTOM_SCENARIOS_STORAGE_KEY,
       persistedValue.length > 0 ? JSON.stringify(persistedValue) : "",
     );
-  }, [professionalCustomScenarios]);
+  }, [persistenceSuspended, professionalCustomScenarios, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_CUSTOM_CANVAS_WIDTH_STORAGE_KEY,
       String(normalizeCanvasDimensionValue(professionalCustomCanvasWidth, DEFAULT_CUSTOM_CANVAS_WIDTH)),
     );
-  }, [professionalCustomCanvasWidth]);
+  }, [persistenceSuspended, professionalCustomCanvasWidth, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_CUSTOM_CANVAS_HEIGHT_STORAGE_KEY,
       String(normalizeCanvasDimensionValue(professionalCustomCanvasHeight, DEFAULT_CUSTOM_CANVAS_HEIGHT)),
     );
-  }, [professionalCustomCanvasHeight]);
+  }, [persistenceSuspended, professionalCustomCanvasHeight, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_SELECTED_LAYOUT_ROWS_STORAGE_KEY,
       String(professionalLayoutRows),
     );
-  }, [professionalLayoutRows]);
+  }, [persistenceSuspended, professionalLayoutRows, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_SELECTED_LAYOUT_COLUMNS_STORAGE_KEY,
       String(professionalLayoutColumns),
     );
-  }, [professionalLayoutColumns]);
+  }, [persistenceSuspended, professionalLayoutColumns, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     if (!availableAspectRatioValueSet.has(professionalStoryboardAspectRatio)) {
       setProfessionalStoryboardAspectRatio(professionalDefaultCellAspectRatio);
       return;
@@ -2026,11 +2211,17 @@ function BananaStudioApp({ routeMode = "login" }) {
     );
   }, [
     availableAspectRatioValueSet,
+    persistenceSuspended,
     professionalDefaultCellAspectRatio,
     professionalStoryboardAspectRatio,
+    routeMode,
   ]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     if (!availableImageSizeValueSet.has(professionalStoryboardImageSize)) {
       setProfessionalStoryboardImageSize(professionalDefaultCellImageSize);
       return;
@@ -2042,18 +2233,28 @@ function BananaStudioApp({ routeMode = "login" }) {
     );
   }, [
     availableImageSizeValueSet,
+    persistenceSuspended,
     professionalDefaultCellImageSize,
     professionalStoryboardImageSize,
+    routeMode,
   ]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_STORYBOARD_DIVIDER_WIDTH_STORAGE_KEY,
       String(normalizeStoryboardDividerWidthPx(professionalStoryboardDividerWidthPx)),
     );
-  }, [professionalStoryboardDividerWidthPx]);
+  }, [persistenceSuspended, professionalStoryboardDividerWidthPx, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_STORYBOARD_CAPTION_FONT_SIZE_STORAGE_KEY,
       String(
@@ -2062,9 +2263,13 @@ function BananaStudioApp({ routeMode = "login" }) {
         ),
       ),
     );
-  }, [professionalStoryboardCaptionFontSizePercent]);
+  }, [persistenceSuspended, professionalStoryboardCaptionFontSizePercent, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     writeLocalValue(
       PROFESSIONAL_STORYBOARD_CAPTION_BACKGROUND_ALPHA_STORAGE_KEY,
       String(
@@ -2073,9 +2278,13 @@ function BananaStudioApp({ routeMode = "login" }) {
         ),
       ),
     );
-  }, [professionalStoryboardCaptionBackgroundAlphaPercent]);
+  }, [persistenceSuspended, professionalStoryboardCaptionBackgroundAlphaPercent, routeMode]);
 
   useEffect(() => {
+    if (routeMode !== "studio" || persistenceSuspended) {
+      return;
+    }
+
     if (!SUPPORTED_IMAGE_COUNT_VALUES.has(professionalSelectedImageCount)) {
       setProfessionalSelectedImageCount(1);
       return;
@@ -2085,21 +2294,25 @@ function BananaStudioApp({ routeMode = "login" }) {
       PROFESSIONAL_SELECTED_IMAGE_COUNT_STORAGE_KEY,
       String(professionalSelectedImageCount),
     );
-  }, [professionalSelectedImageCount]);
+  }, [persistenceSuspended, professionalSelectedImageCount, routeMode]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (routeMode !== "studio" || persistenceSuspended || typeof window === "undefined") {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
+      if (persistenceSuspendedRef.current) {
+        return;
+      }
+
       writeLocalValue(SIMPLE_PROMPT_STORAGE_KEY, simplePrompt);
     }, PROMPT_STORAGE_WRITE_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [simplePrompt]);
+  }, [persistenceSuspended, routeMode, simplePrompt]);
 
   useEffect(() => {
     setStoryboardCells((currentValue) =>
@@ -2206,13 +2419,22 @@ function BananaStudioApp({ routeMode = "login" }) {
   }, [requestTasks, storyboardCellsHydrated]);
 
   useEffect(() => {
-    if (!storyboardCellsHydrated || typeof window === "undefined") {
+    if (
+      routeMode !== "studio" ||
+      persistenceSuspended ||
+      !storyboardCellsHydrated ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
     bumpDevMetric("effect:writePersistedStoryboardCells:scheduled");
 
     const timeoutId = window.setTimeout(() => {
+      if (persistenceSuspendedRef.current) {
+        return;
+      }
+
       bumpDevMetric("effect:writePersistedStoryboardCells:flush");
       void writePersistedStoryboardCells(storyboardCells).catch((error) => {
         console.warn("Persist storyboard cells failed:", error);
@@ -2222,14 +2444,23 @@ function BananaStudioApp({ routeMode = "login" }) {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [storyboardCells, storyboardCellsHydrated]);
+  }, [persistenceSuspended, routeMode, storyboardCells, storyboardCellsHydrated]);
 
   useEffect(() => {
-    if (!simpleReferenceImagesHydrated || typeof window === "undefined") {
+    if (
+      routeMode !== "studio" ||
+      persistenceSuspended ||
+      !simpleReferenceImagesHydrated ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
+      if (persistenceSuspendedRef.current) {
+        return;
+      }
+
       void writePersistedSimpleReferenceImages(simpleReferenceImages).catch((error) => {
         console.warn("Persist simple reference images failed:", error);
       });
@@ -2238,14 +2469,23 @@ function BananaStudioApp({ routeMode = "login" }) {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [simpleReferenceImages, simpleReferenceImagesHydrated]);
+  }, [persistenceSuspended, routeMode, simpleReferenceImages, simpleReferenceImagesHydrated]);
 
   useEffect(() => {
-    if (!referenceImagesHydrated || typeof window === "undefined") {
+    if (
+      routeMode !== "studio" ||
+      persistenceSuspended ||
+      !referenceImagesHydrated ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
+      if (persistenceSuspendedRef.current) {
+        return;
+      }
+
       void writePersistedReferenceImages(referenceImages).catch((error) => {
         console.warn("Persist professional reference images failed:", error);
       });
@@ -2254,7 +2494,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [referenceImages, referenceImagesHydrated]);
+  }, [persistenceSuspended, referenceImages, referenceImagesHydrated, routeMode]);
 
   useEffect(() => {
     if (!storyboardEditorCellId) {
@@ -4924,22 +5164,328 @@ function BananaStudioApp({ routeMode = "login" }) {
     });
   }
 
-  function openResourceManager() {
+  async function openResourceManager(options = {}) {
     if (resourceManagerOpen || resourceManagerPending) {
+      return false;
+    }
+
+    const minPendingMs = Math.max(0, Number(options?.minPendingMs) || 0);
+    const startedAt = Date.now();
+    setResourceManagerPending(true);
+    try {
+      await ensureGenerationLibraryLoaded();
+
+      const elapsedMs = Date.now() - startedAt;
+      const remainingPendingMs = minPendingMs - elapsedMs;
+
+      if (remainingPendingMs > 0) {
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, remainingPendingMs);
+        });
+      }
+
+      setResourceManagerOpen(true);
+      return true;
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "资源管理器加载失败");
+      return false;
+    } finally {
+      setResourceManagerPending(false);
+    }
+  }
+
+  function openResourceManagerFromSettings() {
+    if (settingsPendingAction || resourceManagerPending) {
       return;
     }
 
-    setResourceManagerPending(true);
-    void ensureGenerationLibraryLoaded()
-      .then(() => {
-        setResourceManagerOpen(true);
-      })
-      .catch((error) => {
-        setStudioError(error instanceof Error ? error.message : "资源管理器加载失败");
-      })
-      .finally(() => {
-        setResourceManagerPending(false);
+    void openResourceManager({ minPendingMs: 320 }).then((didOpen) => {
+      if (didOpen) {
+        setSettingsDialogOpen(false);
+      }
+    });
+  }
+
+  function openSettingsDialog() {
+    if (settingsPendingAction) {
+      return;
+    }
+
+    setSettingsDialogOpen(true);
+  }
+
+  function closeSettingsDialog() {
+    if (settingsPendingAction) {
+      return;
+    }
+
+    setSettingsDialogOpen(false);
+  }
+
+  async function handleExportFeedbackZip() {
+    if (settingsPendingAction) {
+      return;
+    }
+
+    setSettingsPendingAction("feedback");
+    setStudioError("");
+    setStudioNotice("");
+
+    try {
+      const [
+        persistedLibraryRecords,
+        persistedCurrentRecord,
+        persistedStoryboardCells,
+        persistedReferenceImages,
+        persistedSimpleReferenceImages,
+        persistedLastGenerationRecordId,
+      ] = await Promise.all([
+        readPersistedGenerationLibrary(),
+        readPersistedCurrentGenerationRecord(),
+        readPersistedStoryboardCells(),
+        readPersistedReferenceImages(),
+        readPersistedSimpleReferenceImages(),
+        generationResultStorage.getItem(LAST_GENERATION_RECORD_ID_KEY),
+      ]);
+      const feedbackBaseName = buildFeedbackExportBaseName();
+      const locationSnapshot = buildFeedbackLocationSnapshot();
+      const localStorageSnapshot = collectLocalStorageSnapshot();
+      const currentSceneArchive = buildCurrentProfessionalSceneArchive();
+      const meta = {
+        exportedAt: new Date().toISOString(),
+        routeMode,
+        sessionState,
+        panelMode,
+        location: locationSnapshot,
+        title: typeof document !== "undefined" ? document.title : "",
+        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
+        online: typeof navigator !== "undefined" ? navigator.onLine : true,
+        language: typeof navigator !== "undefined" ? navigator.language : "",
+        languages: typeof navigator !== "undefined" ? navigator.languages || [] : [],
+        viewport:
+          typeof window !== "undefined"
+            ? {
+                innerWidth: window.innerWidth,
+                innerHeight: window.innerHeight,
+                outerWidth: window.outerWidth,
+                outerHeight: window.outerHeight,
+                devicePixelRatio: window.devicePixelRatio || 1,
+              }
+            : null,
+        screen:
+          typeof window !== "undefined"
+            ? {
+                width: window.screen?.width || 0,
+                height: window.screen?.height || 0,
+                availWidth: window.screen?.availWidth || 0,
+                availHeight: window.screen?.availHeight || 0,
+              }
+            : null,
+        connection:
+          typeof navigator !== "undefined" && navigator.connection
+            ? {
+                effectiveType: navigator.connection.effectiveType || "",
+                downlink: navigator.connection.downlink || 0,
+                rtt: navigator.connection.rtt || 0,
+                saveData: Boolean(navigator.connection.saveData),
+              }
+            : null,
+      };
+      const runtimeState = {
+        auth: {
+          passwordPresent: Boolean(password),
+          activePwPresent: Boolean(activePw),
+          authPending,
+          authError,
+          remainingQuota,
+        },
+        studio: {
+          studioPending,
+          studioError,
+          studioNotice,
+          enhancePending,
+          backendRequestCount,
+          backendBusyLabel,
+          backendBusyEstimateMs,
+          backendBusyStartedAt,
+          backendBusyTickAt,
+          backendBusyStreamText,
+          taskRecoveryPauseCount,
+        },
+        ui: {
+          promptMode,
+          routeMode,
+          panelMode,
+          resourceManagerOpen,
+          resourceManagerPending,
+          resourceManagerFilter,
+          taskManagerOpen,
+          settingsDialogOpen,
+          isMobilePerformanceMode,
+          professionalExportPreviewVisible,
+          professionalExportScale,
+          exampleSceneLoadingLabel,
+        },
+        generation: {
+          selectedModelId: generationModelId,
+          simplePrompt,
+          professionalGlobalPrompt,
+          generationResult: summarizeGenerationRecord(generationResult),
+          generationResults: generationResults.map(summarizeGenerationRecord).filter(Boolean),
+          generationLibraryLoaded,
+          generationLibrary: generationLibrary.map(summarizeGenerationRecord).filter(Boolean),
+          filteredGenerationLibraryCount: filteredGenerationLibrary.length,
+          finderFilters: finderFilters.map((filter) => ({
+            id: filter.id,
+            label: filter.label,
+          })),
+          activeFinderFilter: activeFinderFilter
+            ? {
+                id: activeFinderFilter.id,
+                label: activeFinderFilter.label,
+              }
+            : null,
+        },
+        professionalScene: {
+          canvasSize: professionalCanvasSize,
+          canvasOption: professionalCanvasSizeOption,
+          customCanvasWidth: professionalCustomCanvasWidth,
+          customCanvasHeight: professionalCustomCanvasHeight,
+          layoutRows: professionalLayoutRows,
+          layoutColumns: professionalLayoutColumns,
+          customScenarios: professionalCustomScenarios,
+          activeCustomScenario,
+          activeSystemScenario,
+          selectedImageCount: professionalSelectedImageCount,
+          storyboardAspectRatio: professionalStoryboardAspectRatioValue,
+          storyboardImageSize: professionalStoryboardImageSizeValue,
+          storyboardDividerWidthPx: professionalStoryboardDividerWidthPx,
+          storyboardCaptionFontSizePercent: professionalStoryboardCaptionFontSizePercent,
+          storyboardCaptionBackgroundAlphaPercent:
+            professionalStoryboardCaptionBackgroundAlphaPercent,
+          referenceImages: referenceImages.map(summarizeReferenceImage).filter(Boolean),
+          simpleReferenceImages: simpleReferenceImages
+            .map(summarizeReferenceImage)
+            .filter(Boolean),
+          storyboardCellsHydrated,
+          storyboardTaskStateReady,
+          storyboardHasContent,
+          storyboardHasLoadingCells,
+          storyboardEditorCellId,
+          storyboardEditorMode,
+          storyboardLibraryPickerOpen,
+          storyboardLibraryPickerPending,
+          storyboardShareCopyState,
+          storyboardImageControlsCollapsed,
+          storyboardStyleControlsCollapsed,
+          activeStoryboardDragId,
+          storyboardCellCount: storyboardCellList.length,
+          storyboardCells: summarizeStoryboardCellsForFeedback(storyboardCells),
+          storyboardRuntimeCells: summarizeStoryboardCellsForFeedback(storyboardRuntimeCells),
+        },
+      };
+      const persistedSummary = {
+        generationLibraryRecordCount: persistedLibraryRecords.length,
+        generationLibrary: persistedLibraryRecords.map(summarizeGenerationRecord).filter(Boolean),
+        currentGenerationRecord: summarizeGenerationRecord(persistedCurrentRecord),
+        lastGenerationRecordId:
+          typeof persistedLastGenerationRecordId === "string"
+            ? persistedLastGenerationRecordId
+            : "",
+        professionalStoryboardCells: summarizeStoryboardCellsForFeedback(
+          persistedStoryboardCells,
+        ),
+        professionalReferenceImages: persistedReferenceImages
+          .map(summarizeReferenceImage)
+          .filter(Boolean),
+        simpleReferenceImages: persistedSimpleReferenceImages
+          .map(summarizeReferenceImage)
+          .filter(Boolean),
+      };
+      const zipEntries = [
+        {
+          path: "meta.json",
+          data: JSON.stringify(meta, null, 2),
+        },
+        {
+          path: "runtime/state.json",
+          data: JSON.stringify(runtimeState, null, 2),
+        },
+        {
+          path: "tasks/request-tasks.json",
+          data: JSON.stringify(requestTasks, null, 2),
+        },
+        {
+          path: "storage/localStorage.json",
+          data: JSON.stringify(localStorageSnapshot, null, 2),
+        },
+        {
+          path: "storage/persisted-summary.json",
+          data: JSON.stringify(persistedSummary, null, 2),
+        },
+        {
+          path: "scene/current-professional-scene.json",
+          data: JSON.stringify(currentSceneArchive, null, 2),
+        },
+        {
+          path: "dev/metrics.json",
+          data: JSON.stringify(getDevMetricsSnapshot(), null, 2),
+        },
+      ];
+      const zipBlob = createStoredZipBlob(zipEntries);
+
+      await saveBlobFile(zipBlob, `${feedbackBaseName}.zip`);
+      setStudioNotice(`已导出 ${feedbackBaseName}.zip`);
+      setSettingsDialogOpen(false);
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "反馈包导出失败");
+    } finally {
+      setSettingsPendingAction("");
+    }
+  }
+
+  async function handleResetPage() {
+    if (settingsPendingAction) {
+      return;
+    }
+
+    suspendPersistence();
+    setSettingsPendingAction("reset");
+    setStudioError("");
+    setStudioNotice("");
+
+    try {
+      closeTaskStatusStream();
+      requestAbortControllersRef.current.forEach((controller) => {
+        controller?.abort?.();
       });
+      requestAbortControllersRef.current.clear();
+      useTaskStore.getState().setTaskManagerOpen(false);
+      commitRequestTasks([]);
+
+      if (typeof window !== "undefined") {
+        Object.keys(window.localStorage)
+          .filter((key) => key.startsWith("banana."))
+          .forEach((key) => {
+            window.localStorage.removeItem(key);
+          });
+      }
+
+      await Promise.all([
+        generationResultStorage.removeItem(LAST_GENERATION_RECORD_KEY),
+        generationResultStorage.removeItem(LAST_GENERATION_RECORD_ID_KEY),
+        generationResultStorage.removeItem(PROFESSIONAL_STORYBOARD_CELLS_STORAGE_KEY),
+        generationResultStorage.removeItem(PROFESSIONAL_REFERENCE_IMAGES_STORAGE_KEY),
+        generationResultStorage.removeItem(SIMPLE_REFERENCE_IMAGES_STORAGE_KEY),
+      ]);
+
+      if (typeof window !== "undefined") {
+        window.location.replace(LOGIN_PATH);
+      }
+    } catch (error) {
+      setStudioError(error instanceof Error ? error.message : "页面重置失败");
+      setSettingsPendingAction("");
+    }
   }
 
   function handlePreviewStoredRecord(record) {
@@ -5080,35 +5626,29 @@ function BananaStudioApp({ routeMode = "login" }) {
           </button>
           <button
             type="button"
-            className={`resource-manager-trigger${resourceManagerPending ? " is-pending" : ""}`}
-            onClick={openResourceManager}
-            aria-label={resourceManagerPending ? "资源管理器加载中" : "打开资源管理器"}
-            aria-busy={resourceManagerPending ? "true" : undefined}
-            title={resourceManagerPending ? "资源管理器加载中" : "资源管理器"}
-            disabled={resourceManagerPending}
+            className={`resource-manager-trigger${settingsDialogOpen ? " is-active" : ""}`}
+            onClick={openSettingsDialog}
+            aria-label="打开设置"
+            title="设置"
+            disabled={Boolean(settingsPendingAction)}
           >
-            <span className="sr-only">资源管理器</span>
-            {resourceManagerPending ? (
-              <span className="resource-manager-trigger-spinner" aria-hidden="true" />
-            ) : (
-              <svg
-                viewBox="0 0 24 24"
-                width="20"
-                height="20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <rect width="8" height="18" x="3" y="3" rx="1" />
-                <path d="M7 3v18" />
-                <path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" />
-              </svg>
-            )}
+            <span className="sr-only">设置</span>
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 0 1-4 0v-.09a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 0 1 0-4h.09A1.7 1.7 0 0 0 4.6 8a1.7 1.7 0 0 0-.34-1.87L4.2 6.07a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.7 1.7 0 0 0 8.96 3a1.7 1.7 0 0 0 1.03-1.56V1.4a2 2 0 0 1 4 0v.09A1.7 1.7 0 0 0 15.02 3a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.7 1.7 0 0 0 19.4 8a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 0 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z" />
+            </svg>
             <span className="resource-manager-trigger-label" aria-hidden="true">
-              {resourceManagerPending ? "加载中" : "库"}
+              设置
             </span>
           </button>
         </div>
@@ -6106,6 +6646,15 @@ function BananaStudioApp({ routeMode = "login" }) {
         onCloseCancelConfirm={closeRequestTaskCancelConfirm}
         onOpenCancelConfirm={openRequestTaskCancelConfirm}
         onRetryRequestTask={handleRetryRequestTask}
+      />
+      <SettingsDialog
+        open={settingsDialogOpen}
+        pendingAction={settingsPendingAction}
+        libraryPending={resourceManagerPending}
+        onClose={closeSettingsDialog}
+        onOpenLibrary={openResourceManagerFromSettings}
+        onExportFeedback={handleExportFeedbackZip}
+        onResetPage={handleResetPage}
       />
       <ScenarioManagerDialog
         open={scenarioManagerOpen}
