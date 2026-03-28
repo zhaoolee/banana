@@ -6,7 +6,6 @@ import {
   doesStoryboardCellHaveContent,
   formatPersistedAt,
   getReferenceImageOptimizationSummary,
-  normalizeTextValue,
   resizePromptTextarea,
 } from "../bananaStudioShared.jsx";
 import { useDevRenderMetric } from "../devMetrics.js";

@@ -71,3 +71,19 @@ cp .env.example .env
 docker compose up -d --build
 ```
 启动成功后即可在 http://127.0.0.1:23001 访问, 输入默认提取码 banana 即可
+
+## Playwright 回归
+
+仓库内已经内置 Playwright 回归体系：
+
+```bash
+npm run self-test
+npm run test:e2e
+npm run test:e2e:headed
+npm run test:e2e:ui
+```
+
+- `npm run self-test`：只跑带 `@smoke` 的基础回归，用于提测前快速检查
+- `npm run test:e2e`：跑完整 Playwright 用例
+- 新功能优先在 `tests/e2e/smoke` 或新的功能 spec 中补回归
+- 共享 mock 和测试工具在 `tests/e2e/helpers`

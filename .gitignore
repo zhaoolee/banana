@@ -5,3 +5,4 @@ storage
 npm-debug.log*
 skills/banana-friends-generate
 skills/banana-studio-generate/.env
+output/playwright

@@ -2,7 +2,6 @@ import { KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/c
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  canRetryRequestTask,
   getRequestTaskRetryHandler,
   isRequestTaskTerminal,
   normalizeRequestTaskProgress,
@@ -131,7 +130,6 @@ import {
   drawLayoutGuide,
   readSearchParam,
   detectMobilePerformanceMode,
-  reorderReferenceImages,
   readLocalValue,
   writeLocalValue,
   readStoredProfessionalCustomScenarios,
@@ -140,13 +138,8 @@ import {
   buildProfessionalSceneArchiveBaseName,
   sanitizeExportFileBaseName,
   buildProfessionalSceneArchiveDownloadName,
-  buildProfessionalSceneArchiveZipDownloadName,
   buildProfessionalSceneAssetPackage,
   createStoredZipBlob,
-  formatPersistedAt,
-  getRequestTaskStatusLabel,
-  buildRequestTaskMeta,
-  buildRequestTaskQueueSummary,
   parseRequestTaskTimeMs,
   isOrphanedPendingRequestTask,
   buildOrphanedRequestTaskPatch,
@@ -484,7 +477,6 @@ function BananaStudioApp({ routeMode = "login" }) {
   const [persistenceSuspended, setPersistenceSuspended] = useState(false);
   const [resourceManagerFilter, setResourceManagerFilter] = useState("all");
   const [uploadDragActive, setUploadDragActive] = useState(false);
-  const [referenceDragActive, setReferenceDragActive] = useState(false);
   const [promptMode, setPromptMode] = useState("simple");
   const [professionalCustomCanvasWidth, setProfessionalCustomCanvasWidth] = useState(() =>
     normalizeCanvasDimensionValue(
@@ -599,13 +591,10 @@ function BananaStudioApp({ routeMode = "login" }) {
   const taskStatusStreamGenerationRef = useRef(0);
   const requestAbortControllersRef = useRef(new Map());
   const professionalSceneImportInputRef = useRef(null);
-  const referenceGridRef = useRef(null);
   const {
     imagePreviewOpen,
     imagePreviewRecord,
     imagePreviewDragging,
-    imagePreviewViewportSize,
-    imagePreviewNaturalSize,
     imagePreviewTransform,
     imagePreviewBaseStyle,
     imagePreviewViewportRef,
@@ -2979,36 +2968,6 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
   }
 
-  function handleLayoutCanvasMount(node) {
-    layoutCanvasRef.current = node;
-
-    if (!node || !hasLayoutValues) {
-      return;
-    }
-
-    drawLayoutGuide(node, {
-      aspectRatio: formatCanvasSizeAspectRatioValue(professionalCanvasSizeOption),
-      rows: professionalLayoutRows,
-      columns: professionalLayoutColumns,
-    });
-  }
-
-  function triggerRecordDownload(record) {
-    if (!record?.previewUrl || typeof document === "undefined") {
-      return;
-    }
-
-    const anchor = document.createElement("a");
-    anchor.href = record.previewUrl;
-    anchor.download = record.downloadName || buildDownloadNameWithOptions({
-      mimeType: record.mimeType,
-    });
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-  }
-
   async function handleDownloadProfessionalExport() {
     if (!activePw || !professionalExportHasRenderableContent) {
       return;
@@ -3574,76 +3533,6 @@ function BananaStudioApp({ routeMode = "login" }) {
     }));
   }
 
-  function scrollReferenceItemIntoView(index) {
-    const container = referenceGridRef.current;
-
-    if (!container || index < 0) {
-      return;
-    }
-
-    const referenceItems = container.querySelectorAll("[data-reference-id]");
-    const targetItem = referenceItems[index];
-
-    if (!(targetItem instanceof HTMLElement)) {
-      return;
-    }
-
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = targetItem.getBoundingClientRect();
-    const edgePadding = 28;
-
-    if (targetRect.right > containerRect.right - edgePadding) {
-      container.scrollBy({
-        left: targetRect.right - containerRect.right + edgePadding,
-        behavior: "auto",
-      });
-      return;
-    }
-
-    if (targetRect.left < containerRect.left + edgePadding) {
-      container.scrollBy({
-        left: targetRect.left - containerRect.left - edgePadding,
-        behavior: "auto",
-      });
-    }
-  }
-
-  function handleReferenceDragStart() {
-    setReferenceDragActive(true);
-  }
-
-  function handleReferenceDragUpdate(update) {
-    const { destination, source } = update;
-
-    if (!destination) {
-      return;
-    }
-
-    const targetIndex =
-      destination.index > source.index
-        ? Math.min(destination.index + 1, referenceImages.length - 1)
-        : Math.max(destination.index - 1, 0);
-
-    scrollReferenceItemIntoView(targetIndex);
-  }
-
-  function handleReferenceDragEnd(result) {
-    setReferenceDragActive(false);
-    const { destination, source } = result;
-
-    if (!destination || destination.index === source.index) {
-      return;
-    }
-
-    setReferenceImages((currentValue) =>
-      reorderReferenceImages(currentValue, source.index, destination.index),
-    );
-
-    requestAnimationFrame(() => {
-      scrollReferenceItemIntoView(destination.index);
-    });
-  }
-
   function setCurrentGenerationSelection(records, nextCurrentRecord = records[0] || null) {
     setGenerationResults(records);
     setGenerationResult(nextCurrentRecord);
@@ -3974,12 +3863,6 @@ function BananaStudioApp({ routeMode = "login" }) {
     } catch (error) {
       setStudioError(error instanceof Error ? error.message : "本地资源删除失败");
     }
-  }
-
-  function togglePromptMode() {
-    setPromptMode((currentValue) =>
-      currentValue === "focus" ? "simple" : "focus",
-    );
   }
 
   function updateStoryboardCell(cellId, updater) {

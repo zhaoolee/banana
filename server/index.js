@@ -2530,10 +2530,6 @@ function renderProfessionalExportHtml(payload) {
   const dividerColor = "rgba(255, 255, 255, 0.96)";
   const captionFontScale =
     normalizeStoryboardCaptionFontSizePercent(captionStyle?.fontSizePercent) / 100;
-  const captionBackgroundAlpha =
-    normalizeStoryboardCaptionBackgroundAlphaPercent(
-      captionStyle?.backgroundAlphaPercent,
-    ) / 100;
   const {
     placeholderPadding,
     placeholderFontSize,
@@ -2541,7 +2537,6 @@ function renderProfessionalExportHtml(payload) {
     captionPaddingY,
     captionPaddingX,
     captionFontSize,
-    captionRadius,
   } = getProfessionalExportLayoutMetrics({
     canvasWidth: canvas.width,
     canvasHeight: canvas.height,
