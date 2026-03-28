@@ -15,7 +15,7 @@
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "self-test": "node scripts/self-test/self-test.mjs",
-    "self-test:install": "playwright install chromium"
+    "self-test:install": "node node_modules/playwright/cli.js install chromium"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
