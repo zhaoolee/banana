@@ -3913,24 +3913,28 @@ function BananaStudioApp({ routeMode = "login" }) {
     applyStoryboardEditorDraft(cellId, draft);
   }
 
-  function openStoryboardEditor(cellId) {
-    const cell = storyboardCellsRef.current[cellId];
-
-    if (!cell) {
-      return;
-    }
-
+  function openStoryboardEditorWithCell(cell) {
     setStoryboardEditorMode(
       cell.record && !normalizeTextValue(cell.prompt)
         ? STORYBOARD_EDITOR_MODE_ASSET
         : STORYBOARD_EDITOR_MODE_GENERATE,
     );
     storyboardEditorDraftRef.current = {
-      cellId,
+      cellId: cell.id,
       prompt: typeof cell.prompt === "string" ? cell.prompt : "",
       caption: typeof cell.caption === "string" ? cell.caption : "",
     };
-    setStoryboardEditorCellId(cellId);
+    setStoryboardEditorCellId(cell.id);
+  }
+
+  function openStoryboardEditor(cellId) {
+    const cell = storyboardRuntimeCells[cellId] || storyboardCellsRef.current[cellId];
+
+    if (!cell) {
+      return;
+    }
+
+    openStoryboardEditorWithCell(cell);
   }
 
   function suppressStoryboardCellOpen(cellId) {
@@ -4018,7 +4022,7 @@ function BananaStudioApp({ routeMode = "login" }) {
     }
 
     commitStoryboardEditorDraft();
-    setStoryboardEditorCellId(targetCell.id);
+    openStoryboardEditorWithCell(targetCell);
   }
 
   function openStoryboardClearConfirm() {

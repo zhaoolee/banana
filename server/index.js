@@ -8,6 +8,7 @@ import express from "express";
 import { GoogleAuth } from "google-auth-library";
 import { chromium } from "playwright";
 import { getProfessionalExportLayoutMetrics } from "../shared/professionalExportLayout.js";
+import { PROFESSIONAL_EXPORT_FONT_FAMILY } from "../shared/professionalExportTheme.js";
 import {
   DEFAULT_PW_CREDITS,
   addPwCredits,
@@ -110,6 +111,22 @@ const BANANA_MODELS = [
 let googleAuthClientPromise = null;
 let googleAdcMetadataPromise = null;
 let browserPromise = null;
+let professionalExportFontFaceCssPromise = null;
+
+const PROFESSIONAL_EXPORT_FONT_FILES = [
+  {
+    filename: "OPPOSans-R.ttf",
+    weight: 400,
+  },
+  {
+    filename: "OPPOSans-M.ttf",
+    weight: 500,
+  },
+  {
+    filename: "OPPOSans-B.ttf",
+    weight: 800,
+  },
+];
 
 function getAccessPassword() {
   return (process.env.ACCESS_PASSWORD || "").trim();
@@ -2403,7 +2420,7 @@ function normalizeStoryboardCaptionFontSizePercent(value) {
     return 100;
   }
 
-  return Math.min(Math.max(parsedValue, 70), 160);
+  return Math.min(Math.max(parsedValue, 70), 440);
 }
 
 function normalizeStoryboardDividerWidthPx(value) {
@@ -2522,14 +2539,47 @@ function buildProfessionalExportFilename() {
   return `banana-professional-export-${formatted}.png`;
 }
 
-function renderProfessionalExportHtml(payload) {
+async function getProfessionalExportFontFaceCss() {
+  if (!professionalExportFontFaceCssPromise) {
+    professionalExportFontFaceCssPromise = Promise.all(
+      PROFESSIONAL_EXPORT_FONT_FILES.map(async ({ filename, weight }) => {
+        const filePath = path.join(rootDir, "server", "assets", "fonts", filename);
+        const fontBuffer = await fs.readFile(filePath);
+        const fontDataUrl = `data:font/ttf;base64,${fontBuffer.toString("base64")}`;
+
+        return `
+        @font-face {
+          font-family: "Banana Export Sans";
+          src: url("${fontDataUrl}") format("truetype");
+          font-style: normal;
+          font-weight: ${weight};
+          font-display: block;
+        }`;
+      }),
+    )
+      .then((rules) => rules.join("\n"))
+      .catch((error) => {
+        professionalExportFontFaceCssPromise = null;
+        throw error;
+      });
+  }
+
+  return professionalExportFontFaceCssPromise;
+}
+
+async function renderProfessionalExportHtml(payload) {
   const { canvas, cells, dividerStyle, captionStyle } = payload;
+  const fontFaceCss = await getProfessionalExportFontFaceCss();
   const gridTemplateColumns = `repeat(${canvas.columns}, minmax(0, 1fr))`;
   const gridTemplateRows = `repeat(${canvas.rows}, minmax(0, 1fr))`;
   const dividerSize = normalizeStoryboardDividerWidthPx(dividerStyle?.widthPx);
   const dividerColor = "rgba(255, 255, 255, 0.96)";
   const captionFontScale =
     normalizeStoryboardCaptionFontSizePercent(captionStyle?.fontSizePercent) / 100;
+  const captionBackgroundAlpha =
+    normalizeStoryboardCaptionBackgroundAlphaPercent(
+      captionStyle?.backgroundAlphaPercent,
+    ) / 100;
   const {
     placeholderPadding,
     placeholderFontSize,
@@ -2571,9 +2621,12 @@ function renderProfessionalExportHtml(payload) {
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <title>${escapeHtml(payload.title || "专业模式导出预览")}</title>
       <style>
+        ${fontFaceCss}
         :root {
           color-scheme: light;
-          font-family: "OPPOSans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+          --professional-export-font-family: ${PROFESSIONAL_EXPORT_FONT_FAMILY};
+          --professional-export-caption-background-alpha: ${captionBackgroundAlpha};
+          font-family: var(--professional-export-font-family);
           line-height: 1.5;
           font-weight: 400;
         }
@@ -2637,11 +2690,12 @@ function renderProfessionalExportHtml(payload) {
           display: inline;
           padding: 0 ${Math.max(4, Math.round(captionPaddingX * 0.72))}px ${Math.max(1, Math.round(captionPaddingY * 0.32))}px;
           border-radius: 0;
-          background: rgba(8, 8, 8, 0.75);
+          background: rgba(8, 8, 8, var(--professional-export-caption-background-alpha));
           box-decoration-break: clone;
           -webkit-box-decoration-break: clone;
           color: #ffffff;
-          font-family: "OPPOSans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+          font-family: var(--professional-export-font-family);
+          font-synthesis: none;
           font-size: ${captionFontSize * captionFontScale}px;
           line-height: 1.24;
           font-weight: 800;
@@ -2665,7 +2719,7 @@ async function renderProfessionalExportPreviewPng(payload) {
   });
 
   try {
-    await page.setContent(renderProfessionalExportHtml(payload), {
+    await page.setContent(await renderProfessionalExportHtml(payload), {
       waitUntil: "load",
     });
     await waitForPageAssets(page);

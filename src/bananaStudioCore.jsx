@@ -4,6 +4,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { memo } from "react";
 import { isRequestTaskTerminal } from "./stores/taskStore.js";
 import { getProfessionalExportLayoutMetrics } from "../shared/professionalExportLayout.js";
+import { PROFESSIONAL_EXPORT_FONT_FAMILY } from "../shared/professionalExportTheme.js";
 import * as constants from "./bananaStudioConstants.js";
 import { useDevRenderMetric } from "./devMetrics.js";
 
@@ -966,6 +967,7 @@ export function buildProfessionalExportCssVariables(
     "--professional-export-caption-padding-x": `${metrics.captionPaddingX}px`,
     "--professional-export-caption-font-size": `${metrics.captionFontSize}px`,
     "--professional-export-caption-radius": `${metrics.captionRadius}px`,
+    "--professional-export-font-family": PROFESSIONAL_EXPORT_FONT_FAMILY,
     "--professional-export-caption-font-scale": String(captionFontScale),
     "--professional-export-caption-background-alpha": String(captionBackgroundAlpha),
   };

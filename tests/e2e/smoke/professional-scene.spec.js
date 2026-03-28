@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { Buffer } from "node:buffer";
 import { expect, test } from "../fixtures/test.js";
-import { installApiMocks } from "../helpers/mockApi.js";
+import { installApiMocks, TEST_IMAGE_BASE64 } from "../helpers/mockApi.js";
 import {
   PROFESSIONAL_SCENE_FIXTURE_PATH,
   dispatchImagePaste,
@@ -28,10 +29,35 @@ test("professional scene import and export @smoke", async ({ page }) => {
   await expect(page.locator("#storyboardCellPrompt")).toHaveValue("第一格提示词");
   await expect(page.locator("#storyboardCellCaption")).toHaveValue("第一格配文");
   await expect(page.locator(".storyboard-editor-preview-button img")).toBeVisible();
+  await page.getByRole("button", { name: "下一格" }).click();
+  await expect(page.getByRole("dialog", { name: "第 2 格 输入面板" })).toBeVisible();
+  await expect(page.locator("#storyboardCellPrompt")).toHaveValue("");
+  await page.locator("#storyboardCellPrompt").fill("第二格草稿提示词");
+  await page.getByRole("button", { name: "上一格" }).click();
+  await expect(page.getByRole("dialog", { name: "第 1 格 输入面板" })).toBeVisible();
+  await expect(page.locator("#storyboardCellPrompt")).toHaveValue("第一格提示词");
+  await page.getByRole("button", { name: "下一格" }).click();
+  await expect(page.getByRole("dialog", { name: "第 2 格 输入面板" })).toBeVisible();
+  await expect(page.locator("#storyboardCellPrompt")).toHaveValue("第二格草稿提示词");
+  await page.getByRole("button", { name: "上一格" }).click();
+  await expect(page.getByRole("dialog", { name: "第 1 格 输入面板" })).toBeVisible();
   await page.getByRole("button", { name: "关闭输入面板" }).click();
 
   await page.locator('.storyboard-cell[aria-label^="第 2 格"]').click();
   await expect(page.getByRole("dialog", { name: "第 2 格 输入面板" })).toBeVisible();
+  await page
+    .locator('.storyboard-reference-upload input[type="file"]')
+    .setInputFiles({
+      name: "storyboard-upload-reference.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(TEST_IMAGE_BASE64, "base64"),
+    });
+  await expect(page.getByText("storyboard-upload-reference.png")).toBeVisible();
+  await page.getByRole("button", { name: "关闭输入面板" }).click();
+
+  await page.locator('.storyboard-cell[aria-label^="第 2 格"]').click();
+  await expect(page.getByRole("dialog", { name: "第 2 格 输入面板" })).toBeVisible();
+  await expect(page.getByText("storyboard-upload-reference.png")).toHaveCount(1);
   await dispatchImagePaste(page, "clipboard-reference.png");
   await expect(page.getByText("clipboard-reference.png")).toBeVisible();
   await page.getByRole("button", { name: "关闭输入面板" }).click();

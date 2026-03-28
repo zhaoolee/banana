@@ -1,3 +1,27 @@
+@font-face {
+  font-family: "Banana Export Sans";
+  src: url("../server/assets/fonts/OPPOSans-R.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Banana Export Sans";
+  src: url("../server/assets/fonts/OPPOSans-M.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Banana Export Sans";
+  src: url("../server/assets/fonts/OPPOSans-B.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 800;
+  font-display: block;
+}
+
 :root {
   color-scheme: light;
   --bg: #f9e7a1;
@@ -1712,6 +1736,7 @@ textarea:focus {
 }
 
 .storyboard-editor-panel {
+  position: relative;
   width: min(920px, 100%);
   max-height: calc(100dvh - 40px);
   display: grid;
@@ -1727,6 +1752,8 @@ textarea:focus {
 }
 
 .storyboard-editor-windowbar {
+  position: relative;
+  z-index: 2;
   display: grid;
   grid-template-columns: 32px minmax(0, 1fr) 32px;
   align-items: center;
@@ -1757,6 +1784,8 @@ textarea:focus {
   padding: 7px 12px;
   border-radius: 10px;
   white-space: nowrap;
+  position: relative;
+  z-index: 1;
 }
 
 .storyboard-editor-layout {
@@ -1770,6 +1799,8 @@ textarea:focus {
 }
 
 .storyboard-editor-mode-row {
+  position: relative;
+  z-index: 2;
   padding: 16px 16px 0;
 }
 
@@ -1783,6 +1814,13 @@ textarea:focus {
   align-content: start;
   min-width: 0;
   gap: 10px;
+  position: relative;
+  z-index: 2;
+}
+
+.storyboard-editor-layout > .storyboard-editor-preview-card {
+  position: relative;
+  z-index: 1;
 }
 
 .storyboard-editor-mode-switcher {
@@ -1836,10 +1874,13 @@ textarea:focus {
 }
 
 .storyboard-editor-footer {
+  position: relative;
+  z-index: 3;
   padding: 0 16px 16px;
 }
 
 .storyboard-editor-pager {
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -2013,6 +2054,8 @@ textarea:focus {
 }
 
 .storyboard-editor-actions {
+  position: relative;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -3273,17 +3316,12 @@ textarea {
     calc(var(--professional-export-caption-padding-x, 0.42em) * 0.72)
     calc(var(--professional-export-caption-padding-y, 0.16em) * 0.32);
   border-radius: 0;
-  background: rgba(8, 8, 8, 0.75);
+  background: rgba(8, 8, 8, var(--professional-export-caption-background-alpha, 0.75));
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
   color: #ffffff;
-  font-family:
-    -apple-system,
-    BlinkMacSystemFont,
-    "SF Pro Display",
-    "PingFang SC",
-    "Helvetica Neue",
-    sans-serif;
+  font-family: var(--professional-export-font-family, "Helvetica Neue", Helvetica, Arial, sans-serif);
+  font-synthesis: none;
   font-size: calc(
     var(--professional-export-caption-font-size, 0.8rem) *
     var(--professional-export-caption-font-scale, 1)

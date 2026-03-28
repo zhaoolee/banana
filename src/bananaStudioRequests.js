@@ -10,8 +10,6 @@ const {
 const {
   createPersistedRecordId,
   normalizeTextValue,
-  optimizeReferenceImageFile,
-  readFileAsDataUrl,
 } = core;
 
 const {
@@ -62,9 +60,12 @@ async function parseJsonResponse(response) {
 }
 
 async function readFileAsImagePayload(file, { optimize = false } = {}) {
-  const optimizedFileResult = optimize ? await optimizeReferenceImageFile(file) : null;
+  const optimizedFileResult =
+    optimize && typeof core.optimizeReferenceImageFile === "function"
+      ? await core.optimizeReferenceImageFile(file)
+      : null;
   const fileToRead = optimizedFileResult?.file || file;
-  const dataUrl = await readFileAsDataUrl(fileToRead);
+  const dataUrl = await core.readFileAsDataUrl(fileToRead);
 
   const [, base64 = ""] = dataUrl.split(",", 2);
 
