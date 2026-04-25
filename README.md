@@ -60,34 +60,53 @@
 
 ## 部署方式
 
-运行 gcloud auth application-default login 完成登陆，获取Vertex ADC认证文件
-保证 `${HOME}/.config/gcloud/application_default_credentials.json` 存在
+生产环境推荐使用 GitHub Action 自动构建并发布的 Docker 镜像，并使用 host 网络部署，避免部分服务器 Docker bridge 网络访问 Google API 超时。
 
-推荐直接使用 GitHub Action 自动构建并发布的 Docker 镜像：
+先运行 `gcloud auth application-default login` 完成登陆，获取 Vertex ADC 认证文件，保证 `${HOME}/.config/gcloud/application_default_credentials.json` 存在。
 
 ```
-git clone https://github.com/zhaoolee/banana
+mkdir -p banana/storage
 cd banana
-cp .env.example .env
-# 按需修改 .env 中的配置
-docker compose pull
-docker compose up -d
+
+cat > .env <<'EOF'
+ACCESS_PASSWORD=banana
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=PLEASESETSECUREPASSWORD
+EOF
+
+docker pull zhaoolee/banana:dev
+docker rm -f banana-studio 2>/dev/null || true
+
+docker run -d \
+  --name banana-studio \
+  --restart unless-stopped \
+  --network host \
+  --env-file .env \
+  -e GEMINI_AUTH_MODE=vertex-adc \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json \
+  -e GOOGLE_CLOUD_LOCATION=global \
+  -v "$PWD/storage:/app/storage" \
+  -v "$HOME/.config/gcloud:/root/.config/gcloud:ro" \
+  zhaoolee/banana:dev
 ```
 
-默认镜像为 `zhaoolee/banana:latest`。如需指定其它镜像：
+启动成功后即可在 http://127.0.0.1:23001 访问，输入默认提取码 `banana` 即可。
+
+如需使用稳定版镜像，可将命令中的镜像 tag 改为 `latest`：
 
 ```
-BANANA_IMAGE=your-dockerhub-user/banana:dev docker compose up -d
+docker pull zhaoolee/banana:latest
+# docker run 最后一行改为 zhaoolee/banana:latest
 ```
 
 如需在服务器本地构建镜像：
 
 ```
+git clone https://github.com/zhaoolee/banana
+cd banana
 docker build -t banana:local .
-BANANA_IMAGE=banana:local docker compose up -d
+# docker run 最后一行改为 banana:local
 ```
-
-启动成功后即可在 http://127.0.0.1:23001 访问, 输入默认提取码 banana 即可
 
 ## Playwright 回归
 
