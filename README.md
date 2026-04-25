@@ -63,13 +63,30 @@
 运行 gcloud auth application-default login 完成登陆，获取Vertex ADC认证文件
 保证 `${HOME}/.config/gcloud/application_default_credentials.json` 存在
 
+推荐直接使用 GitHub Action 自动构建并发布的 Docker 镜像：
+
 ```
 git clone https://github.com/zhaoolee/banana
 cd banana
 cp .env.example .env
 # 按需修改 .env 中的配置
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+默认镜像为 `zhaoolee/banana:latest`。如需指定其它镜像：
+
+```
+BANANA_IMAGE=your-dockerhub-user/banana:dev docker compose up -d
+```
+
+如需在服务器本地构建镜像：
+
+```
+docker build -t banana:local .
+BANANA_IMAGE=banana:local docker compose up -d
+```
+
 启动成功后即可在 http://127.0.0.1:23001 访问, 输入默认提取码 banana 即可
 
 ## Playwright 回归

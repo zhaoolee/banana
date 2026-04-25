@@ -1,8 +1,6 @@
 services:
   banana:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${BANANA_IMAGE:-zhaoolee/banana:latest}
     container_name: banana-studio
     ports:
       - "23001:23001"
