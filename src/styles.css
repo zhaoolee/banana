@@ -4210,6 +4210,26 @@ textarea {
   .image-preview-overlay {
     background: rgba(25, 18, 8, 0.92);
   }
+
+  .resource-manager-trigger-spinner,
+  .storyboard-cell.is-loading,
+  .storyboard-cell.is-loading .storyboard-cell-status::before,
+  .storyboard-editor-preview-card.is-refreshing .storyboard-editor-preview-button::after,
+  .storyboard-editor-library-spinner,
+  .request-busy-overlay,
+  .request-busy-halo,
+  .request-busy-orb,
+  .request-busy-progress.is-complete span {
+    animation: none;
+  }
+
+  .request-busy-halo {
+    display: none;
+  }
+
+  .storyboard-cell.is-loading .storyboard-cell-status::before {
+    box-shadow: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

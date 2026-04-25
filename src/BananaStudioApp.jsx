@@ -1438,14 +1438,15 @@ function BananaStudioApp({ routeMode = "login" }) {
 
     setBackendBusyTickAt(Date.now());
 
+    const tickIntervalMs = isMobilePerformanceMode ? 1000 : 250;
     const intervalId = window.setInterval(() => {
       setBackendBusyTickAt(Date.now());
-    }, 250);
+    }, tickIntervalMs);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isBackendBusy]);
+  }, [isBackendBusy, isMobilePerformanceMode]);
 
   useEffect(() => {
     if (isE2eStudioMode) {
